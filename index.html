@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>臺中二中 巡堂紀錄系統</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <!-- Babel (JSX 編譯器) -->
+  <script src="https://unpkg.com/@babel/standalone@7.23.8/babel.min.js"></script>
+  
+  <!-- Firebase (Compat 版本) -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+
+  <!-- Chart.js 圖表庫 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+  <!-- SheetJS (Excel 解析庫) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+  <style>
+    /* 避免 emoji 在某些裝置顯示過小 */
+    .emoji-icon { font-family: "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+  
+  <div id="root"></div>
+
+  <!-- React 應用程式代碼 -->
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // ==========================================
+    // 1. 雲端資料庫初始化 (Firebase)
+    // ==========================================
+    const firebaseConfig = {
+      apiKey: "AIzaSyDP8EfWIrGPd41KjSjIjv22okTDPTTmLIw",
+      authDomain: "tcssh-patrol-system.firebaseapp.com",
+      projectId: "tcssh-patrol-system",
+      storageBucket: "tcssh-patrol-system.firebasestorage.app",
+      messagingSenderId: "757960129787",
+      appId: "1:757960129787:web:8c866b297da855b31e045e",
+      measurementId: "G-YNVJB0G4NN"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+    const APP_ID = 'tcssh-patrol-system';
+
+    // 系統設定常數
+    const OFFICES = ['校長室', '教務處', '學務處', '總務處', '輔導處', '圖書館'];
+    const TITLES = ['校長', '主任', '主任教官', '組長', '學創人員', '幹事', '其他'];
+    const PERIODS = ['第1節', '第2節', '第3節', '第4節', '第5節', '第6節', '第7節', '第8節', '午休', '其他'];
+    const VIOLATIONS = [
+      { code: '✓', short: '正常上課', desc: '正常上課', isNormal: true },
+      { code: 'A', short: '嬉鬧吵雜', desc: '嬉鬧吵雜,課堂管理欠佳', isNormal: false },
+      { code: 'B', short: '學生睡覺', desc: '睡覺人數較多(須填寫人數)', isNormal: false },
+      { code: 'C', short: '手機/3C', desc: '不當使用手機或3C產品', isNormal: false },
+      { code: 'D', short: '環境髒亂', desc: '教室或走廊髒亂', isNormal: false },
+      { code: 'E', short: '門窗未關', desc: '室外課教室門窗未關', isNormal: false },
+      { code: 'F', short: '電源未關', desc: '室外課教室電源未關', isNormal: false },
+      { code: 'G', short: '老師未到', desc: '老師無故未到(須填說明)', isNormal: false },
+      { code: 'H', short: '學生滯留', desc: '學生異常滯留/未到課(須填說明)', isNormal: false },
+    ];
+
+    function App() {
+      const [currentView, setCurrentView] = useState('frontend'); 
+      const [records, setRecords] = useState([]); 
+      const [user, setUser] = useState(null);
+      const [isAuthChecking, setIsAuthChecking] = useState(true);
+      const [isSyncing, setIsSyncing] = useState(true);
+      const [toast, setToast] = useState(null);
+
+      const showToast = (msg) => {
+        setToast(msg);
+        setTimeout(() => setToast(null), 3000);
+      };
+
+      // ==========================================
+      // ★ 嚴格學校帳號驗證區塊 ★
+      // ==========================================
+      useEffect(() => {
+        const unsubscribeAuth = auth.onAuthStateChanged((currentUser) => {
+          if (currentUser) {
+            // 檢查信箱網域是否為二中 (tcssh.tc.edu.tw)
+            if (currentUser.email && currentUser.email.endsWith('@tcssh.tc.edu.tw')) {
+              setUser(currentUser);
+            } else {
+              auth.signOut();
+              setUser(null);
+              setToast("⛔ 權限不足：為維護資料安全，請使用二中 (@tcssh.tc.edu.tw) 學校帳號登入！");
+              setTimeout(() => setToast(null), 5000);
+            }
+          } else {
+            setUser(null);
+          }
+          setIsAuthChecking(false);
+        });
+
+        // 捕捉 Redirect 登入可能發生的錯誤 (加入 try-catch 防止在不支援的環境中當機)
+        try {
+          auth.getRedirectResult().catch(err => {
+            console.warn("跳轉登入檢查發生錯誤 (可忽略):", err);
+          });
+        } catch (e) {
+          console.warn("目前環境不支援 Redirect 檢查:", e);
+        }
+
+        return () => unsubscribeAuth();
+      }, []);
+
+      const handleGoogleLogin = () => {
+        const provider = new firebase.auth.GoogleAuthProvider();
+        provider.setCustomParameters({ hd: 'tcssh.tc.edu.tw' }); // 自動過濾只顯示學校帳號
+        
+        // 改用 Popup 登入，因為它在預覽環境與多數手機瀏覽器中相容性較高
+        auth.signInWithPopup(provider).catch(err => {
+          if (err.code === 'auth/popup-blocked') {
+             alert("登入視窗被您的瀏覽器阻擋了。請允許彈出視窗，或點選右上角「以預設瀏覽器開啟」後再試一次。");
+          } else {
+             console.error("登入失敗", err);
+             alert("登入失敗：" + err.message);
+          }
+        });
+      };
+
+      const handleLogout = () => {
+        if(window.confirm("確定要登出系統嗎？")) {
+          auth.signOut();
+        }
+      };
+
+      useEffect(() => {
+        if (!user) return;
+        const recordsRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('patrolRecords');
+        
+        const unsubscribeDB = recordsRef.onSnapshot((snapshot) => {
+          const data = [];
+          snapshot.forEach(doc => {
+            const docData = doc.data();
+            if (!docData.violationCodes && docData.violationCode) {
+               docData.violationCodes = docData.violationCode.split(',');
+            } else if (!docData.violationCodes) {
+               docData.violationCodes = ['✓'];
+            }
+            data.push({ id: doc.id, ...docData });
+          });
+          setRecords(data);
+          setIsSyncing(false);
+        }, (error) => {
+          console.error("Snapshot error:", error);
+          setIsSyncing(false);
+        });
+
+        return () => unsubscribeDB();
+      }, [user]);
+
+      const addRecordsToDB = async (newRecords) => {
+        if (!user) return;
+        const recordsRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('patrolRecords');
+        
+        const chunkSize = 450;
+        for (let i = 0; i < newRecords.length; i += chunkSize) {
+          const chunk = newRecords.slice(i, i + chunkSize);
+          const batch = db.batch();
+          chunk.forEach(r => {
+            const docRef = recordsRef.doc(r.id);
+            batch.set(docRef, r);
+          });
+          await batch.commit();
+        }
+      };
+
+      const updateRecordToDB = async (recordData) => {
+        if (!user) return;
+        const recordsRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('patrolRecords');
+        await recordsRef.doc(recordData.id).set(recordData);
+      };
+
+      const deleteRecordFromDB = async (id) => {
+        if (!user) return;
+        const recordsRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('patrolRecords');
+        await recordsRef.doc(id).delete();
+      };
+
+      if (isAuthChecking) {
+        return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="text-xl text-gray-500 font-bold animate-pulse">系統權限驗證中...</div></div>;
+      }
+
+      if (!user) {
+        return (
+          <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+            <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center border-t-4 border-blue-600">
+              <div className="text-6xl mb-4 emoji-icon">🏫</div>
+              <h1 className="text-2xl font-bold text-gray-800 mb-2">臺中二中 巡堂系統</h1>
+              <p className="text-gray-600 mb-8 text-sm leading-relaxed">
+                為確保校園資料安全，本系統已啟用防護機制。<br/>
+                <span className="font-bold text-red-500">僅限本校教職員存取，外校人士無法進入。</span>
+              </p>
+              <button 
+                onClick={handleGoogleLogin} 
+                className="w-full bg-blue-600 text-white font-bold py-3.5 px-4 rounded-xl hover:bg-blue-700 transition-colors flex items-center justify-center shadow-md active:scale-95"
+              >
+                <span className="mr-2 text-xl emoji-icon">🔐</span> 使用學校 Google 帳號登入
+              </button>
+              {toast && <div className="mt-5 p-3 bg-red-50 text-red-600 rounded-lg text-sm font-bold border border-red-200">{toast}</div>}
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen">
+          <nav className="bg-blue-800 text-white shadow-md sticky top-0 z-40">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+              <div className="flex justify-between h-16">
+                <div className="flex items-center space-x-3">
+                  <span className="text-2xl emoji-icon">📋</span>
+                  <span className="font-bold text-lg tracking-wider hidden sm:inline">臺中二中 巡堂系統</span>
+                  <span className="font-bold text-lg tracking-wider sm:hidden">二中 巡堂系統</span>
+                  
+                  <div className="hidden lg:flex items-center space-x-2 ml-4">
+                    <span className="flex items-center text-xs text-blue-200 bg-blue-900 px-2 py-1 rounded-full border border-blue-700" title={user.email}>
+                      <span className="mr-1 emoji-icon">👤</span> {user.email.split('@')[0]}
+                    </span>
+                    <span className="flex items-center text-xs text-blue-200 bg-blue-900 px-2 py-1 rounded-full border border-blue-700">
+                      <span className="mr-1 emoji-icon">☁️</span> {isSyncing ? '同步中...' : '已連線'}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center space-x-1 sm:space-x-3">
+                  <button onClick={handleLogout} className="px-2 py-1.5 text-xs font-medium text-blue-200 hover:text-white hover:bg-blue-700 rounded transition-colors mr-1 sm:mr-3 border border-transparent hover:border-blue-600">
+                    登出
+                  </button>
+                  <button onClick={() => setCurrentView('frontend')} className={`px-3 py-2 rounded-md text-sm font-medium flex items-center transition-colors ${currentView === 'frontend' ? 'bg-blue-900 text-white shadow-inner' : 'text-blue-100 hover:bg-blue-700'}`}>
+                    <span className="mr-1 sm:mr-2 emoji-icon">✏️</span><span className="hidden sm:inline">填表端</span><span className="sm:hidden">填表</span>
+                  </button>
+                  <button onClick={() => setCurrentView('backend')} className={`px-3 py-2 rounded-md text-sm font-medium flex items-center transition-colors ${currentView === 'backend' ? 'bg-blue-900 text-white shadow-inner' : 'text-blue-100 hover:bg-blue-700'}`}>
+                    <span className="mr-1 sm:mr-2 emoji-icon">⚙️</span><span className="hidden sm:inline">後台端</span><span className="sm:hidden">後台</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </nav>
+
+          {toast && (
+            <div className="fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-gray-800 text-white px-4 py-2 rounded-full shadow-lg flex items-center text-sm">
+              <span className="mr-2 emoji-icon">✅</span> {toast}
+            </div>
+          )}
+
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+            {currentView === 'frontend' ? (
+              <FrontendView addRecords={addRecordsToDB} showToast={showToast} isSyncing={isSyncing} user={user} />
+            ) : (
+              <BackendView records={records} addRecords={addRecordsToDB} deleteRecord={deleteRecordFromDB} updateRecord={updateRecordToDB} showToast={showToast} />
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    function FrontendView({ addRecords, showToast, isSyncing, user }) {
+      const todayStr = new Date().toISOString().split('T')[0];
+      
+      // ★ 新增：時間與節次自動判別邏輯 ★
+      const guessCurrentPeriod = () => {
+          const now = new Date();
+          const time = now.getHours() * 100 + now.getMinutes(); // 產生如 1030 的時間格式
+          if (time >= 800 && time < 905) return '第1節';
+          if (time >= 905 && time < 1005) return '第2節';
+          if (time >= 1005 && time < 1105) return '第3節';
+          if (time >= 1105 && time < 1205) return '第4節';
+          if (time >= 1205 && time < 1300) return '午休';
+          if (time >= 1300 && time < 1355) return '第5節';
+          if (time >= 1355 && time < 1455) return '第6節';
+          if (time >= 1455 && time < 1605) return '第7節';
+          if (time >= 1605 && time < 1715) return '第8節';
+          return '第1節'; // 預設值
+      };
+
+      // ★ 新增：基本資料自動記憶 (LocalStorage) 結合 Google 姓名帶入 ★
+      const [basicInfo, setBasicInfo] = useState(() => {
+        const savedProfile = localStorage.getItem('tcssh_profile');
+        let defaultOffice = '';
+        let defaultTitle = '';
+        let defaultName = user && user.displayName ? user.displayName : '';
+        
+        if (savedProfile) {
+          try {
+            const parsed = JSON.parse(savedProfile);
+            defaultOffice = parsed.office || '';
+            defaultTitle = parsed.title || '';
+            defaultName = parsed.name || defaultName;
+          } catch (e) {}
+        }
+        return { 
+            office: defaultOffice, 
+            title: defaultTitle, 
+            name: defaultName, 
+            date: todayStr, 
+            period: guessCurrentPeriod(), 
+            customPeriod: '' 
+        };
+      });
+
+      // 當使用者修改基本資料時，自動將偏好設定永久記錄在手機裡
+      useEffect(() => {
+        localStorage.setItem('tcssh_profile', JSON.stringify({
+          office: basicInfo.office,
+          title: basicInfo.title,
+          name: basicInfo.name
+        }));
+      }, [basicInfo.office, basicInfo.title, basicInfo.name]);
+
+      const getEmptyRow = () => ({ id: crypto.randomUUID(), classId: '', teacher: '', violationCodes: ['✓'], remark: '', photo: null });
+      const [draftRows, setDraftRows] = useState([getEmptyRow()]);
+      const [isSubmitting, setIsSubmitting] = useState(false);
+      
+      const [quickGrade, setQuickGrade] = useState(1);
+      const [showSopModal, setShowSopModal] = useState(false); 
+
+      const compressImage = (file, maxWidth = 800, maxHeight = 800, quality = 0.6) => {
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = (event) => {
+            const img = new Image();
+            img.src = event.target.result;
+            img.onload = () => {
+              let { width, height } = img;
+              if (width > height && width > maxWidth) {
+                height = Math.round((height * maxWidth) / width); width = maxWidth;
+              } else if (height > maxHeight) {
+                width = Math.round((width * maxHeight) / height); height = maxHeight;
+              }
+              const canvas = document.createElement('canvas');
+              canvas.width = width; canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0, width, height);
+              resolve(canvas.toDataURL('image/jpeg', quality));
+            };
+          };
+        });
+      };
+
+      const handlePhotoUpload = async (e, rowId) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const compressedBase64 = await compressImage(file);
+        updateDraftRow(rowId, 'photo', compressedBase64);
+      };
+
+      const updateBasicInfo = (field, value) => setBasicInfo(prev => ({ ...prev, [field]: value }));
+      const updateDraftRow = (id, field, value) => setDraftRows(prev => prev.map(row => row.id === id ? { ...row, [field]: value } : row));
+      const addRow = () => setDraftRows(prev => [...prev, getEmptyRow()]);
+      const removeRow = (id) => {
+        if (draftRows.length === 1) setDraftRows([getEmptyRow()]);
+        else setDraftRows(prev => prev.filter(row => row.id !== id));
+      };
+
+      const handleQuickAddClass = (classId) => {
+        const emptyRowIndex = draftRows.findIndex(r => r.classId === '' && r.remark === '' && r.violationCodes.length === 1 && r.violationCodes[0] === '✓');
+        if (emptyRowIndex >= 0) {
+            setDraftRows(prev => {
+                const next = [...prev];
+                next[emptyRowIndex] = { ...next[emptyRowIndex], classId };
+                return next;
+            });
+        } else {
+            setDraftRows(prev => [...prev, { ...getEmptyRow(), classId }]);
+        }
+      };
+
+      const toggleViolation = (rowId, code) => {
+        setDraftRows(prev => prev.map(row => {
+          if (row.id !== rowId) return row;
+          let newCodes = [...(row.violationCodes || [])];
+          if (code === '✓') {
+            newCodes = ['✓'];
+          } else {
+            newCodes = newCodes.filter(c => c !== '✓');
+            if (newCodes.includes(code)) {
+              newCodes = newCodes.filter(c => c !== code);
+              if (newCodes.length === 0) newCodes = ['✓'];
+            } else {
+              newCodes.push(code);
+            }
+          }
+          return { ...row, violationCodes: newCodes };
+        }));
+      };
+
+      const submitRecords = async (rowsToSubmit) => {
+        if (!basicInfo.office || !basicInfo.title || !basicInfo.name || !basicInfo.date) {
+          alert("請先填寫完整「基本資料」（處室、職稱、姓名、日期）"); return;
+        }
+        if (basicInfo.period === '其他' && !basicInfo.customPeriod) {
+          alert("請輸入自訂節次時間"); return;
+        }
+        if (isSyncing) { alert("系統正在連接雲端，請稍候再送出"); return; }
+
+        setIsSubmitting(true);
+        const validRows = [];
+        const invalidRows = [];
+
+        rowsToSubmit.forEach(row => {
+          if (!row.classId.trim()) return;
+          if (row.violationCodes.some(c => ['B', 'G', 'H'].includes(c)) && !row.remark.trim()) {
+            alert(`班級 ${row.classId} 選擇了須填寫備註的代號，請務必填寫備註說明！`);
+            invalidRows.push(row);
+          } else {
+            const fallbackCode = row.violationCodes.includes('✓') ? '✓' : row.violationCodes.join(',');
+            validRows.push({ ...row, ...basicInfo, violationCode: fallbackCode, period: basicInfo.period === '其他' ? basicInfo.customPeriod : basicInfo.period, timestamp: Date.now() });
+          }
+        });
+
+        if (validRows.length === 0) {
+          if (invalidRows.length === 0) alert("請至少填寫一個班級編號。");
+          setIsSubmitting(false); return;
+        }
+
+        try {
+          await addRecords(validRows);
+          showToast(`已成功送出 ${validRows.length} 筆紀錄至雲端！`);
+          const remainingDrafts = draftRows.filter(draft => !validRows.some(valid => valid.id === draft.id));
+          setDraftRows(remainingDrafts.length > 0 ? remainingDrafts : [getEmptyRow()]);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        } catch (err) {
+          alert("送出失敗，請確認網路連線！"); console.error(err);
+        } finally {
+          setIsSubmitting(false);
+        }
+      };
+
+      return (
+        <div className="space-y-6">
+          {/* 跑班選課課表快速連結 & SOP */}
+          <div className="grid grid-cols-2 gap-2">
+             <a href="https://docs.google.com/spreadsheets/d/11zpB-oBpUVQsU9whvLjyiuNYOwQq7_lOZkT90fjCyJU/edit?usp=sharing" target="_blank" rel="noreferrer" className="flex items-center justify-center w-full bg-white border border-blue-200 text-blue-700 py-3 rounded-xl hover:bg-blue-50 transition-colors font-bold text-sm sm:text-base shadow-sm">
+                <span className="mr-2 text-xl emoji-icon">🔗</span> 跑班選課表
+             </a>
+             <button onClick={() => setShowSopModal(true)} className="flex items-center justify-center w-full bg-white border border-orange-200 text-orange-700 py-3 rounded-xl hover:bg-orange-50 transition-colors font-bold text-sm sm:text-base shadow-sm">
+                <span className="mr-2 text-xl emoji-icon">📋</span> 巡堂處置SOP
+             </button>
+          </div>
+
+          <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+            <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center border-b pb-2">
+              <span className="bg-blue-600 text-white w-6 h-6 rounded-full inline-flex items-center justify-center text-sm mr-2">1</span>
+              填寫基本資料 <span className="text-sm font-normal text-green-600 ml-2">(自動判別與記憶)</span>
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+              <div><label className="block text-sm font-medium text-gray-700 mb-1">處室</label><select className="w-full border-gray-300 rounded-md shadow-sm p-2 border" value={basicInfo.office} onChange={e => updateBasicInfo('office', e.target.value)}><option value="">請選擇</option>{OFFICES.map(o => <option key={o} value={o}>{o}</option>)}</select></div>
+              <div><label className="block text-sm font-medium text-gray-700 mb-1">職稱</label><select className="w-full border-gray-300 rounded-md shadow-sm p-2 border" value={basicInfo.title} onChange={e => updateBasicInfo('title', e.target.value)}><option value="">請選擇</option>{TITLES.map(t => <option key={t} value={t}>{t}</option>)}</select></div>
+              <div><label className="block text-sm font-medium text-gray-700 mb-1">姓名</label><input type="text" className="w-full border-gray-300 rounded-md shadow-sm p-2 border" placeholder="您的姓名" value={basicInfo.name} onChange={e => updateBasicInfo('name', e.target.value)} /></div>
+              <div><label className="block text-sm font-medium text-gray-700 mb-1">日期</label><input type="date" className="w-full border-gray-300 rounded-md shadow-sm p-2 border" value={basicInfo.date} onChange={e => updateBasicInfo('date', e.target.value)} /></div>
+              <div className="flex flex-col"><label className="block text-sm font-medium text-gray-700 mb-1">節次</label><div className="flex space-x-2"><select className="w-full border-gray-300 rounded-md shadow-sm p-2 border" value={basicInfo.period} onChange={e => updateBasicInfo('period', e.target.value)}>{PERIODS.map(p => <option key={p} value={p}>{p}</option>)}</select>{basicInfo.period === '其他' && (<input type="text" className="w-full border-gray-300 rounded-md shadow-sm p-2 border" placeholder="如:07:30~08:00" value={basicInfo.customPeriod} onChange={e => updateBasicInfo('customPeriod', e.target.value)} />)}</div></div>
+            </div>
+          </div>
+
+          <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+            <div className="flex justify-between items-end border-b pb-2 mb-4">
+              <h2 className="text-lg font-bold text-gray-800 flex items-center">
+                <span className="bg-blue-600 text-white w-6 h-6 rounded-full inline-flex items-center justify-center text-sm mr-2">2</span>填寫班級狀況
+              </h2>
+            </div>
+
+            <div className="space-y-4">
+              {draftRows.map(row => {
+                const requiresRemark = row.violationCodes.some(c => ['B', 'G', 'H'].includes(c));
+                return (
+                <div key={row.id} className="relative bg-gray-50 border border-gray-200 rounded-lg p-4 pt-8 sm:pt-4">
+                  <button onClick={() => removeRow(row.id)} className="absolute top-2 right-2 text-gray-400 hover:text-red-500 bg-white rounded-full p-1 shadow-sm" title="刪除此列"><span className="emoji-icon">❌</span></button>
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">班級</label>
+                      <input type="text" placeholder="班級(例:101)" className="w-full border-gray-300 rounded-md p-2 border" value={row.classId} onChange={e => updateDraftRow(row.id, 'classId', e.target.value)} />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">老師(選填)</label>
+                      <input type="text" placeholder="老師" className="w-full border-gray-300 rounded-md p-2 border" value={row.teacher} onChange={e => updateDraftRow(row.id, 'teacher', e.target.value)} />
+                    </div>
+                    
+                    <div className="md:col-span-3">
+                      <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">狀況代號(可點擊複選)</label>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-1">
+                        {VIOLATIONS.map(v => {
+                          const isSelected = row.violationCodes.includes(v.code);
+                          return (
+                            <button
+                              key={v.code} type="button" onClick={() => toggleViolation(row.id, v.code)} title={v.desc}
+                              className={`px-2 py-2 text-xs sm:text-sm font-bold rounded-lg shadow-sm border transition-colors flex items-center justify-center ${isSelected ? (v.isNormal ? 'bg-green-600 text-white border-green-700' : 'bg-red-500 text-white border-red-600') : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
+                            >
+                              <span className="mr-1 opacity-70">[{v.code}]</span> {v.short}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="md:col-span-3">
+                      <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">備註</label>
+                      <input type="text" placeholder={requiresRemark ? "必填！說明人數或狀況" : "備註"} className={`w-full border-gray-300 rounded-md p-2 border ${requiresRemark && !row.remark ? 'border-red-400 bg-red-50' : ''}`} value={row.remark} onChange={e => updateDraftRow(row.id, 'remark', e.target.value)} />
+                    </div>
+                    <div className="md:col-span-1 flex justify-center">
+                      <label className="cursor-pointer text-gray-500 flex flex-col items-center">
+                        {row.photo ? <img src={row.photo} className="w-10 h-10 object-cover rounded-md border" /> : <span className="text-2xl emoji-icon">📷</span>}
+                        <span className="text-[10px] mt-1">{row.photo ? '重選' : '拍照'}</span>
+                        <input type="file" accept="image/*" capture="environment" className="hidden" onChange={e => handlePhotoUpload(e, row.id)} />
+                      </label>
+                    </div>
+                    <div className="md:col-span-1 flex items-center h-full mt-2 md:mt-0">
+                      <button onClick={() => submitRecords([row])} disabled={!row.classId || isSubmitting} className="w-full bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700 disabled:bg-gray-300 shadow-sm flex justify-center">
+                        <span className="emoji-icon">📤</span> <span className="md:hidden ml-1">送出</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )})}
+            </div>
+
+            {/* 新版底部常駐：快速新增班級面板 */}
+            <div className="mt-6 bg-indigo-50 p-4 rounded-xl border border-indigo-100 shadow-inner">
+               <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-3 border-b border-indigo-100 pb-3 gap-3">
+                 <div className="font-bold text-indigo-800 flex items-center text-base sm:text-lg">
+                    <span className="text-xl mr-1 emoji-icon">⚡</span> 快速新增下一個班級
+                 </div>
+                 <button onClick={addRow} className="text-xs sm:text-sm bg-white text-indigo-600 border border-indigo-200 px-3 py-2 rounded-md hover:bg-indigo-100 font-medium transition-colors shadow-sm self-start sm:self-auto">
+                   ➕ 手動新增空白列
+                 </button>
+               </div>
+               
+               <div className="flex space-x-2 mb-3">
+                 {[1, 2, 3].map(g => (
+                   <button key={g} onClick={() => setQuickGrade(g)} className={`flex-1 py-2 rounded-md font-bold text-sm sm:text-base transition-colors ${quickGrade === g ? 'bg-indigo-500 text-white shadow-md' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-100'}`}>
+                     高{['一','二','三'][g-1]}
+                   </button>
+                 ))}
+               </div>
+               
+               <div className="grid grid-cols-5 sm:grid-cols-8 gap-1.5 sm:gap-2">
+                 {Array.from({length: 25}, (_, i) => {
+                   const classNum = String(i + 1).padStart(2, '0');
+                   const classId = `${quickGrade}${classNum}`;
+                   const isAdded = draftRows.some(r => r.classId === classId);
+                   return (
+                     <button key={classId} onClick={() => handleQuickAddClass(classId)} disabled={isAdded} className={`py-2.5 rounded border text-sm sm:text-base font-bold transition-colors ${isAdded ? 'bg-indigo-100 text-indigo-300 border-indigo-100 cursor-not-allowed' : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-500 hover:text-white hover:border-indigo-500 shadow-sm'}`}>
+                       {classId}
+                     </button>
+                   );
+                 })}
+               </div>
+            </div>
+
+            <div className="mt-6 pt-4 border-t flex justify-end">
+              <button onClick={() => submitRecords(draftRows)} disabled={isSubmitting} className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 font-bold flex items-center shadow-md w-full sm:w-auto justify-center">
+                <span className="mr-2 text-xl emoji-icon">☁️</span> {isSubmitting ? '同步中...' : `全部送出 (${draftRows.filter(r => r.classId).length}筆)`}
+              </button>
+            </div>
+          </div>
+
+          {/* 巡堂 SOP Modal */}
+          {showSopModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg flex flex-col max-h-[85vh]">
+                <div className="p-4 border-b bg-orange-50 rounded-t-xl flex justify-between items-center">
+                  <h3 className="font-bold text-orange-800 text-lg flex items-center"><span className="emoji-icon mr-2">📋</span> 巡堂與異常處置 SOP</h3>
+                  <button onClick={() => setShowSopModal(false)} className="text-gray-500 hover:text-gray-800 emoji-icon text-xl">❌</button>
+                </div>
+                <div className="p-5 overflow-y-auto space-y-5 text-sm text-gray-700 leading-relaxed">
+                  
+                  <div className="border-l-4 border-red-500 pl-3">
+                    <h4 className="font-bold text-red-700 text-base mb-1">[C] 違規使用手機</h4>
+                    <ul className="list-disc list-inside ml-2 space-y-1">
+                      <li>巡堂人員得進入教室制止。</li>
+                      <li>於系統登記違規資料 (代號C)。</li>
+                      <li>將手機代管並移交**學務處**，後續由學務處依校規處理。</li>
+                    </ul>
+                  </div>
+
+                  <div className="border-l-4 border-purple-500 pl-3">
+                    <h4 className="font-bold text-purple-700 text-base mb-1">[H] 跑班課程學生滯留/遊蕩</h4>
+                    <ol className="list-decimal list-inside ml-2 space-y-1">
+                      <li>**引導歸建**：先了解滯留原因，引導其至指定教室上課。</li>
+                      <li>**即時聯繫**：運用分機表致電任課老師 (體育課通知體育組) 告知動向以完成交接。</li>
+                      <li>**拒絕上課處置**：若勸導無效，引導至學務處，或致電請教官處置。</li>
+                    </ol>
+                  </div>
+
+                  <div className="border-l-4 border-blue-500 pl-3">
+                    <h4 className="font-bold text-blue-700 text-base mb-1">未參與校外課(含遲到)之安置</h4>
+                    <ul className="list-disc list-inside ml-2 space-y-1">
+                      <li>引導至指定地點自習：(1)圖書館 (2)學務處 (3)教務處。</li>
+                      <li>督促完成任課老師預留之學習單。</li>
+                      <li>教學組將以 email 統一通知任課教師。</li>
+                    </ul>
+                  </div>
+
+                  <div className="border-l-4 border-green-500 pl-3">
+                    <h4 className="font-bold text-green-700 text-base mb-1">[D/E/F] 硬體與環境缺失</h4>
+                    <ul className="list-disc list-inside ml-2 space-y-1">
+                      <li>教室未關燈/窗或設備損壞，於系統紀錄。</li>
+                      <li>後續由系統(教學組)通知導師及**總務處**協處。</li>
+                    </ul>
+                  </div>
+
+                </div>
+                <div className="p-4 border-t flex justify-end">
+                  <button onClick={() => setShowSopModal(false)} className="px-5 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 font-bold">了解</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    function DashboardChart({ type, data, options }) {
+      const canvasRef = useRef(null);
+      const chartRef = useRef(null);
+
+      useEffect(() => {
+        if (chartRef.current) chartRef.current.destroy();
+        if (!canvasRef.current) return;
+        const ctx = canvasRef.current.getContext('2d');
+        chartRef.current = new Chart(ctx, { type, data, options: { responsive: true, maintainAspectRatio: false, ...options } });
+        return () => { if (chartRef.current) chartRef.current.destroy(); };
+      }, [type, data, options]);
+
+      return <div className="relative h-64 w-full"><canvas ref={canvasRef}></canvas></div>;
+    }
+
+    function BackendView({ records, addRecords, deleteRecord, updateRecord, showToast }) {
+      const [filterDate, setFilterDate] = useState(new Date().toISOString().split('T')[0]);
+      const [filterOffice, setFilterOffice] = useState('');
+      const [filterHOnly, setFilterHOnly] = useState(false);
+      const [editingRecord, setEditingRecord] = useState(null);
+      const [showAddModal, setShowAddModal] = useState(false);
+      
+      const [emailData, setEmailData] = useState(null); 
+      const fileInputRef = useRef(null); 
+
+      // ==========================================
+      // ★ 教學組公用帳號發信設定區 ★
+      // ==========================================
+      const EMAIL_API_URL = ""; 
+      
+      const filteredRecords = useMemo(() => {
+        return records
+          .filter(r => filterDate ? r.date === filterDate : true)
+          .filter(r => filterOffice ? r.office === filterOffice : true)
+          .filter(r => filterHOnly ? (r.violationCodes || []).includes('H') : true)
+          .sort((a, b) => b.timestamp - a.timestamp);
+      }, [records, filterDate, filterOffice, filterHOnly]);
+
+      // 初始化 Email Modal 狀態
+      const openEmailModal = (r) => {
+        setEmailData({
+            isOpen: true,
+            record: r,
+            to: '',
+            template: 'teacher',
+            studentName: '',
+            reportTime: '',
+            subject: '',
+            body: ''
+        });
+      };
+
+      // 監聽並自動產生 Email 範本內容
+      useEffect(() => {
+        if (!emailData || !emailData.isOpen) return;
+        
+        const r = emailData.record;
+        const codes = r.violationCodes || ['✓'];
+        const descText = codes.map(c => {
+          const vInfo = VIOLATIONS.find(v => v.code === c);
+          return vInfo ? `[${c}] ${vInfo.desc}` : c;
+        }).join('\n');
+
+        let genSubj = '';
+        let genBody = '';
+
+        if (emailData.template === 'teacher') {
+            genSubj = `[巡堂紀錄通知] ${r.date} 第${r.period} - 班級：${r.classId}`;
+            genBody = `任課教師 / 導師 您好：\n\n教務處於巡堂時發現以下狀況，敬請協助留意與輔導：\n\n`+
+                      `一、時間：${r.date} 第${r.period}\n`+
+                      `二、班級：${r.classId}\n`+
+                      `三、紀錄事項：\n${descText}\n\n`+
+                      `【備註說明】\n${r.remark || '無'}\n\n`+
+                      `巡堂人員：${r.name} (${r.office})\n`+
+                      `教務處教學組 敬啟`;
+        } else if (emailData.template === 'student') {
+            genSubj = `[約談通知] ${r.classId} 巡堂違規約談單 - ${emailData.studentName || '(請輸入姓名)'}`;
+            genBody = `一、時間：${r.date} 第${r.period}\n`+
+                      `二、學生班級：${r.classId}\n`+
+                      `三、學生姓名/座號：${emailData.studentName || '(請輸入姓名)'}\n`+
+                      `四、所見情形：\n${descText}\n\n`+
+                      `※ 注意事項：\n請該名學生於 ${emailData.reportTime || '(請輸入約談時間)'} 至 教務處教學組 說明。\n\n`+
+                      `教務處教學組 敬啟`;
+        } else if (emailData.template === 'student_affairs') {
+            genSubj = `[學務通報] ${r.date} 第${r.period} - 班級：${r.classId} 異常處置通報`;
+            genBody = `學務處 / 主任教官 您好：\n\n教務處巡堂時發現以下異常狀況，已依SOP進行初步處置，後續敬請學務處協助辦理：\n\n`+
+                      `一、班級：${r.classId}\n`+
+                      `二、狀況紀錄：\n${descText}\n\n`+
+                      `【初步處置與備註】\n${r.remark || '無'}\n\n`+
+                      `巡堂人員：${r.name} (${r.office})`;
+        } else if (emailData.template === 'general_affairs') {
+            genSubj = `[總務通報] ${r.classId} 設施與環境異常通報`;
+            genBody = `總務處 您好：\n\n教務處巡堂時發現以下環境或設施異常，敬請協助處理：\n\n`+
+                      `一、地點/班級：${r.classId} (${r.date} 第${r.period})\n`+
+                      `二、異常狀況：\n${descText}\n\n`+
+                      `【詳細說明】\n${r.remark || '無'}\n\n`+
+                      `巡堂人員：${r.name} (${r.office})`;
+        }
+
+        setEmailData(prev => ({ ...prev, subject: genSubj, body: genBody }));
+      }, [emailData?.template, emailData?.studentName, emailData?.reportTime, emailData?.record]);
+
+      const executeSendEmail = async () => {
+        if (!emailData.to) return alert("請輸入收件人信箱");
+
+        if (EMAIL_API_URL && EMAIL_API_URL.startsWith("http")) {
+            try {
+                showToast("📧 信件背景發送中...");
+                const toEmail = emailData.to;
+                const subjectStr = emailData.subject;
+                const bodyStr = emailData.body;
+                setEmailData(null); 
+
+                const formData = new URLSearchParams();
+                formData.append('to', toEmail);
+                formData.append('subject', subjectStr);
+                formData.append('body', bodyStr);
+
+                await fetch(EMAIL_API_URL, {
+                    method: 'POST',
+                    mode: 'no-cors', 
+                    body: formData
+                });
+                
+                showToast("✅ 已成功由公用帳號發出通知信！");
+            } catch(e) {
+                alert("發送失敗，請檢查網路連線");
+            }
+        } else {
+            window.location.href = `mailto:${emailData.to}?subject=${encodeURIComponent(emailData.subject)}&body=${encodeURIComponent(emailData.body)}`;
+            setEmailData(null); 
+        }
+      };
+
+      const handleImportExcel = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = async (evt) => {
+          try {
+            const data = new Uint8Array(evt.target.result);
+            const workbook = XLSX.read(data, { type: 'array' });
+            const firstSheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[firstSheetName];
+            const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+            if (jsonData.length === 0) { alert("檔案中沒有資料！"); return; }
+
+            const importedRecords = [];
+            jsonData.forEach(rawRow => {
+              const row = {};
+              Object.keys(rawRow).forEach(k => { row[k.trim()] = rawRow[k]; });
+
+              const classId = String(row['班級'] || row['班級編號'] || '').trim();
+              if (!classId) return;
+
+              let dateStr = row['日期'];
+              if (typeof dateStr === 'number') {
+                const excelEpoch = new Date(1899, 11, 30);
+                dateStr = new Date(excelEpoch.getTime() + dateStr * 86400000).toISOString().split('T')[0];
+              } else if (typeof dateStr === 'string') {
+                dateStr = dateStr.replace(/\//g, '-');
+                const parts = dateStr.split('-');
+                if(parts.length === 3) {
+                   const y = parts[0].length === 2 ? '20'+parts[0] : parts[0];
+                   const m = parts[1].padStart(2, '0');
+                   const d = parts[2].padStart(2, '0');
+                   dateStr = `${y}-${m}-${d}`;
+                }
+              } else {
+                dateStr = new Date().toISOString().split('T')[0];
+              }
+
+              const rawCodesStr = String(row['代號'] || row['違規代號'] || '✓').trim();
+              const parsedCodes = rawCodesStr.split(/[,、]/).map(c => c.trim()).filter(c => c);
+
+              importedRecords.push({
+                id: crypto.randomUUID(),
+                date: dateStr,
+                period: String(row['節次'] || '其他').trim(),
+                office: String(row['處室'] || '').trim(),
+                title: String(row['職稱'] || '').trim(),
+                name: String(row['姓名'] || '匯入資料').trim(),
+                classId: classId,
+                teacher: String(row['任課老師'] || '').trim(),
+                violationCodes: parsedCodes.length > 0 ? parsedCodes : ['✓'],
+                violationCode: parsedCodes.includes('✓') ? '✓' : parsedCodes.join(','),
+                remark: String(row['備註'] || row['狀況描述'] || '').trim(),
+                photo: null,
+                timestamp: Date.now()
+              });
+            });
+
+            if (importedRecords.length > 0) {
+              if (window.confirm(`成功讀取 ${importedRecords.length} 筆紀錄，確定要整批匯入雲端嗎？\n(匯入後將自動清除篩選以顯示資料)`)) {
+                await addRecords(importedRecords);
+                setFilterDate('');
+                setFilterOffice('');
+                showToast(`成功匯入 ${importedRecords.length} 筆資料！`);
+              }
+            } else {
+              alert("找不到可匯入的資料，請確認 Excel 標題列是否包含「班級」");
+            }
+          } catch (error) {
+            console.error(error);
+            alert("匯入失敗，請確認檔案格式是否正確。");
+          }
+          if(fileInputRef.current) fileInputRef.current.value = '';
+        };
+        reader.readAsArrayBuffer(file);
+      };
+
+      const handleExportWord = () => {
+        if (filteredRecords.length === 0) { alert("無紀錄可匯出"); return; }
+        const targetDate = new Date(filterDate || filteredRecords[0].date);
+        const year = targetDate.getFullYear() - 1911;
+        const month = targetDate.getMonth() + 1;
+        const day = targetDate.getDate();
+        const weekDayStr = ['日', '一', '二', '三', '四', '五', '六'][targetDate.getDay()];
+        
+        let tableRows = '', photoDivs = '';
+        const patrolNames = [...new Set(filteredRecords.map(r => r.name))].join('、');
+
+        filteredRecords.forEach(r => {
+          const codes = r.violationCodes || ['✓'];
+          const isNormal = codes.includes('✓');
+          const vText = isNormal ? '正常' : codes.join(', ');
+          
+          tableRows += `<tr><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.classId}</td><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.period}</td><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.teacher || ''}</td><td style="border: 1px solid black; padding: 8px; text-align: center; font-weight: ${isNormal?'normal':'bold'}; color: ${isNormal?'black':'red'};">${vText}</td><td style="border: 1px solid black; padding: 8px; text-align: left;">${r.remark || ''}</td></tr>`;
+          
+          if (r.photo) {
+            photoDivs += `<div style="margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;"><h4 style="margin-top: 0;">📌 ${r.period} - 班級：${r.classId}</h4><p>狀況：${vText}</p><p>備註：${r.remark || '無'}</p><img src="${r.photo}" style="max-width: 500px; border: 1px solid #eee;" /></div>`;
+          }
+        });
+
+        const htmlContent = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset="UTF-8"><style>body { font-family: "標楷體", "DFKai-sb", serif; color: #000; line-height: 1.5; } table { width: 100%; border-collapse: collapse; margin-bottom: 20px; } h1 { text-align: center; font-size: 24px; letter-spacing: 2px; } .legend { font-size: 14px; border: 1px solid #000; padding: 10px; margin-bottom: 20px; }</style></head><body><h1>臺中市立臺中第二高級中學巡堂紀錄表</h1><div style="display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 16px;"><span>日期： <u> &nbsp;${year}&nbsp; </u> 年 <u> &nbsp;${month}&nbsp; </u> 月 <u> &nbsp;${day}&nbsp; </u> 日 星期 <u> &nbsp;${weekDayStr}&nbsp; </u></span><span style="float: right;">巡堂人員： <u> &nbsp;${patrolNames || '_______________'}&nbsp; </u></span></div><table style="border: 1px solid black;"><thead><tr><th style="border: 1px solid black; padding: 8px; width: 12%; background-color: #f2f2f2;">班別</th><th style="border: 1px solid black; padding: 8px; width: 12%; background-color: #f2f2f2;">節次</th><th style="border: 1px solid black; padding: 8px; width: 15%; background-color: #f2f2f2;">任課老師</th><th style="border: 1px solid black; padding: 8px; width: 15%; background-color: #f2f2f2;">紀錄</th><th style="border: 1px solid black; padding: 8px; width: 46%; background-color: #f2f2f2;">違規及待改進事項</th></tr></thead><tbody>${tableRows || '<tr><td colspan="5" style="border: 1px solid black; text-align: center; padding: 10px;">無紀錄</td></tr>'}</tbody></table><div class="legend"><strong>紀錄代號：</strong><br>A. 嬉鬧吵雜,課堂管理欠佳<br>B. 睡覺人數較多(請註記:大概人數*n)<br>C. 不當使用手機或3C產品(請學生到走廊登記學號)<br>D. 教室或走廊髒亂<br>E. 室外課教室 門窗未關閉 &nbsp;&nbsp;&nbsp;&nbsp; F. 室外課教室 電源未關閉<br>G. 老師無故未到 &nbsp;&nbsp;&nbsp;&nbsp; H. 學生異常滯留/未到課</div><table style="width: 100%; margin-top: 40px; border: none;"><tr><td style="border: none; text-align: left; vertical-align: bottom; height: 80px;">巡堂：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">會簽：<br><br><br>學務處：___________  <br>其他：_____________</td><td style="border: none; text-align: left; vertical-align: bottom;">教學組長：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">教務主任：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">校長：<br><br><br>_________________</td></tr></table>${photoDivs ? `<br clear=all style='mso-special-character:line-break;page-break-before:always'><h2 style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px;">附件：巡堂照片紀錄</h2>${photoDivs}` : ''}</body></html>`;
+
+        const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword;charset=utf-8;' });
+        const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `巡堂紀錄表_${filterDate}.doc`; link.click();
+      };
+
+      const handleExportCSV = () => {
+        if (records.length === 0) { alert("無紀錄可匯出"); return; }
+        const headers = ['日期', '節次', '處室', '職稱', '姓名', '班級', '任課老師', '代號', '備註', '時間戳記'];
+        const rows = records.map(r => {
+          const vText = (r.violationCodes || ['✓']).join(',');
+          return [r.date, r.period, r.office, r.title, r.name, r.classId, r.teacher || '', vText, r.remark || '', new Date(r.timestamp).toLocaleString()].map(f => `"${String(f).replace(/"/g, '""')}"`).join(',');
+        });
+        const blob = new Blob(["\uFEFF" + headers.join(',') + '\n' + rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `巡堂紀錄_${filterDate}.csv`; link.click();
+      };
+
+      const stats = {
+        total: records.length, 
+        violations: records.filter(r => !(r.violationCodes||['✓']).includes('✓')).length,
+        todayTotal: records.filter(r => r.date === new Date().toISOString().split('T')[0]).length,
+        todayViolations: records.filter(r => r.date === new Date().toISOString().split('T')[0] && !(r.violationCodes||['✓']).includes('✓')).length
+      };
+
+      const chartData = useMemo(() => {
+        const vCounts = {}, pCounts = {}, oCounts = {};
+        filteredRecords.forEach(r => {
+          oCounts[r.office] = (oCounts[r.office] || 0) + 1;
+          const codes = r.violationCodes || ['✓'];
+          if (!codes.includes('✓')) {
+            pCounts[r.period] = (pCounts[r.period] || 0) + 1;
+            codes.forEach(c => {
+               const vDef = VIOLATIONS.find(v => v.code === c);
+               const vLabel = vDef ? `${c}-${vDef.desc.substring(0,4)}...` : c;
+               vCounts[vLabel] = (vCounts[vLabel] || 0) + 1;
+            });
+          }
+        });
+
+        return {
+          violations: { labels: Object.keys(vCounts), datasets: [{ data: Object.values(vCounts), backgroundColor: ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e', '#06b6d4'] }] },
+          periods: { labels: PERIODS.filter(p => p !== '其他' && p !== '午休'), datasets: [{ label: '違規次數', data: PERIODS.filter(p => p !== '其他' && p !== '午休').map(p => pCounts[p] || 0), backgroundColor: '#3b82f6', borderRadius: 4 }] },
+          offices: { labels: OFFICES, datasets: [{ label: '巡堂班次', data: OFFICES.map(o => oCounts[o] || 0), backgroundColor: '#8b5cf6', borderRadius: 4 }] }
+        };
+      }, [filteredRecords]);
+
+      return (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-white p-4 rounded-xl shadow border text-center"><div className="text-gray-500 text-sm mb-1">系統總班次</div><div className="text-3xl font-bold text-blue-600">{stats.total}</div></div>
+            <div className="bg-white p-4 rounded-xl shadow border text-center"><div className="text-gray-500 text-sm mb-1">系統違規班次</div><div className="text-3xl font-bold text-red-500">{stats.violations}</div></div>
+            <div className="bg-white p-4 rounded-xl shadow border text-center"><div className="text-gray-500 text-sm mb-1">今日巡堂班次</div><div className="text-3xl font-bold text-green-600">{stats.todayTotal}</div></div>
+            <div className="bg-white p-4 rounded-xl shadow border text-center"><div className="text-gray-500 text-sm mb-1">今日違規班次</div><div className="text-3xl font-bold text-orange-500">{stats.todayViolations}</div></div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="bg-white p-4 rounded-xl shadow border"><h3 className="text-gray-700 font-bold mb-2 text-center">各類違規佔比</h3>{chartData.violations.labels.length > 0 ? <DashboardChart type="doughnut" data={chartData.violations} options={{ plugins: { legend: { position: 'bottom' } } }} /> : <div className="h-64 flex items-center justify-center text-gray-400">無違規數據</div>}</div>
+            <div className="bg-white p-4 rounded-xl shadow border"><h3 className="text-gray-700 font-bold mb-2 text-center">各節次違規熱區</h3><DashboardChart type="bar" data={chartData.periods} options={{ plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } } }} /></div>
+            <div className="bg-white p-4 rounded-xl shadow border"><h3 className="text-gray-700 font-bold mb-2 text-center">各處室巡堂動能</h3><DashboardChart type="bar" data={chartData.offices} options={{ indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true, ticks: { stepSize: 1 } } } }} /></div>
+          </div>
+
+          <div className="bg-white p-4 rounded-xl shadow border flex flex-col lg:flex-row justify-between items-center gap-4">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="bg-gray-100 p-2 rounded-md emoji-icon">🔍</span>
+              <input type="date" className="border rounded p-2 text-sm" value={filterDate} onChange={e => setFilterDate(e.target.value)} />
+              <select className="border rounded p-2 text-sm" value={filterOffice} onChange={e => setFilterOffice(e.target.value)}><option value="">所有處室</option>{OFFICES.map(o => <option key={o}>{o}</option>)}</select>
+              <label className="flex items-center space-x-1 text-sm font-medium text-red-600 bg-red-50 px-2 py-1.5 rounded cursor-pointer border border-red-200">
+                <input type="checkbox" checked={filterHOnly} onChange={e => setFilterHOnly(e.target.checked)} className="rounded text-red-600 focus:ring-red-500" />
+                <span>只看 [H] 滯留</span>
+              </label>
+            </div>
+            
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <input type="file" ref={fileInputRef} onChange={handleImportExcel} accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel" className="hidden" />
+              <button onClick={() => fileInputRef.current.click()} className="bg-amber-500 text-white px-3 py-2 rounded text-sm font-medium"><span className="emoji-icon mr-1">📂</span> 匯入 Excel</button>
+              <button onClick={() => setShowAddModal(true)} className="bg-blue-100 text-blue-700 px-3 py-2 rounded text-sm font-medium"><span className="emoji-icon mr-1">➕</span> 補充</button>
+              <button onClick={handleExportWord} className="bg-white border border-gray-300 text-gray-700 px-3 py-2 rounded text-sm font-medium hover:bg-gray-50"><span className="emoji-icon mr-1">🖨️</span> Word檔</button>
+              <button onClick={handleExportCSV} className="bg-green-600 text-white px-3 py-2 rounded text-sm font-medium"><span className="emoji-icon mr-1">📥</span> CSV</button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl shadow border overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr><th className="px-4 py-3 text-left text-xs text-gray-500">日期/節次</th><th className="px-4 py-3 text-left text-xs text-gray-500">巡堂人員</th><th className="px-4 py-3 text-left text-xs text-gray-500">班級/老師</th><th className="px-4 py-3 text-left text-xs text-gray-500">狀況</th><th className="px-4 py-3 text-left text-xs text-gray-500">備註/照片</th><th className="px-4 py-3 text-right text-xs text-gray-500">操作</th></tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {filteredRecords.length === 0 ? <tr><td colSpan="6" className="text-center p-10 text-gray-500"><div className="text-4xl emoji-icon">📄</div>無紀錄</td></tr> : 
+                  filteredRecords.map(r => {
+                    const isNormal = (r.violationCodes||['✓']).includes('✓');
+                    const hasAlert = !(r.violationCodes||[]).includes('✓');
+                    return (
+                    <tr key={r.id} className={hasAlert ? "bg-red-50/20" : ""}>
+                      <td className="px-4 py-3 text-sm">{r.date}<br/><span className="text-gray-500 text-xs">{r.period}</span></td>
+                      <td className="px-4 py-3 text-sm">{r.name}<br/><span className="text-gray-500 text-xs">{r.office}</span></td>
+                      <td className="px-4 py-3 text-sm font-bold text-blue-700">{r.classId}<br/><span className="text-gray-500 text-xs font-normal">{r.teacher || '-'}</span></td>
+                      <td className="px-4 py-3 text-sm">
+                        <div className="flex flex-wrap gap-1">
+                          {(r.violationCodes || ['✓']).map(c => <span key={c} className={`px-2 py-0.5 rounded text-xs font-bold ${c === 'H' ? 'bg-red-500 text-white shadow-sm' : (isNormal ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800')}`}>{c}</span>)}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-sm max-w-[200px] truncate" title={r.remark}>{r.remark || '-'} {r.photo && <img src={r.photo} className="h-8 w-8 mt-1 border cursor-pointer" onClick={() => window.open(r.photo)} />}</td>
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        {hasAlert && (
+                          <button onClick={() => openEmailModal(r)} className="text-white bg-red-500 hover:bg-red-600 px-3 py-1.5 rounded mr-2 text-xs font-bold shadow-sm transition-colors" title="發送通報與通知">✉️ 通報/通知</button>
+                        )}
+                        <button onClick={() => setEditingRecord(r)} className="text-indigo-600 bg-indigo-50 p-2 rounded mr-1 emoji-icon" title="編輯">✏️</button>
+                        <button onClick={() => { if(window.confirm("刪除這筆？")) { deleteRecord(r.id); showToast("已刪除"); } }} className="text-red-600 bg-red-50 p-2 rounded emoji-icon" title="刪除">🗑️</button>
+                      </td>
+                    </tr>
+                  )})}
+              </tbody>
+            </table>
+          </div>
+
+          {(editingRecord || showAddModal) && (
+            <EditModal record={editingRecord} isAdd={showAddModal} defaultDate={filterDate} onClose={() => { setEditingRecord(null); setShowAddModal(false); }} onSave={async (data) => {
+              const fallbackCode = data.violationCodes.includes('✓') ? '✓' : data.violationCodes.join(',');
+              if (showAddModal) { await updateRecord({...data, violationCode: fallbackCode, id: crypto.randomUUID(), timestamp: Date.now()}); showToast("補充完成"); } 
+              else { await updateRecord({...data, violationCode: fallbackCode}); showToast("更新完成"); }
+              setEditingRecord(null); setShowAddModal(false);
+            }} />
+          )}
+
+          {/* 新增/升級：多功能智慧通報視窗 */}
+          {emailData && emailData.isOpen && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg flex flex-col max-h-[95vh]">
+                <div className="p-4 border-b bg-blue-50 rounded-t-xl flex justify-between items-center">
+                  <h3 className="font-bold text-blue-800 text-lg flex items-center"><span className="emoji-icon mr-2">✉️</span> 發送異常通報與通知</h3>
+                  <button onClick={() => setEmailData(null)} className="text-gray-500 hover:text-gray-800 emoji-icon text-xl">❌</button>
+                </div>
+                <div className="p-5 overflow-y-auto space-y-4">
+                  
+                  <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
+                    <label className="block text-sm font-bold text-yellow-800 mb-1">📋 選擇通報對象與類型</label>
+                    <select className="w-full border-yellow-300 rounded p-2 focus:ring-yellow-500 text-sm font-medium" 
+                            value={emailData.template} 
+                            onChange={e => setEmailData({...emailData, template: e.target.value})}>
+                      <option value="teacher">👨‍🏫 【通知任課/導師】(提醒留意與輔導)</option>
+                      <option value="student">👦 【學生面談通知單】(通知學生至教務處說明)</option>
+                      <option value="student_affairs">🛡️ 【學務處通報】(手機沒收/滯留未歸處置通報)</option>
+                      <option value="general_affairs">🛠️ 【總務環境通報】(設施損壞/水電門窗未關通報)</option>
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-bold text-gray-700 mb-1">收件人信箱</label>
+                      <input type="email" className="w-full border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500" value={emailData.to} onChange={e => setEmailData({...emailData, to: e.target.value})} placeholder="輸入收件人 Email" />
+                    </div>
+                    
+                    {/* 若為學生約談單，動態展開欄位 */}
+                    {emailData.template === 'student' && (
+                      <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-bold text-indigo-700 mb-1">違規學生姓名/座號</label>
+                          <input type="text" className="w-full border-indigo-200 bg-indigo-50 rounded-md p-2 text-sm focus:ring-indigo-500" value={emailData.studentName} onChange={e => setEmailData({...emailData, studentName: e.target.value})} placeholder="例: 05 王小明" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-indigo-700 mb-1">約談時間 (請至教務處)</label>
+                          <input type="text" className="w-full border-indigo-200 bg-indigo-50 rounded-md p-2 text-sm focus:ring-indigo-500" value={emailData.reportTime} onChange={e => setEmailData({...emailData, reportTime: e.target.value})} placeholder="例: 今日 12:30" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">自動生成主旨</label>
+                    <input type="text" className="w-full border-gray-300 rounded-md p-2 text-sm bg-gray-50 text-gray-800" value={emailData.subject} onChange={e => setEmailData({...emailData, subject: e.target.value})} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">自動生成內容預覽 (發送前可手動修改)</label>
+                    <textarea className="w-full border-gray-300 rounded-md p-2 text-sm bg-gray-50 text-gray-800 leading-relaxed" rows="8" value={emailData.body} onChange={e => setEmailData({...emailData, body: e.target.value})}></textarea>
+                  </div>
+                </div>
+
+                <div className="p-4 border-t bg-gray-50 rounded-b-xl flex flex-col gap-2">
+                  {!EMAIL_API_URL && (
+                    <div className="text-xs text-gray-500 text-center mb-1">💡 系統目前使用您的本機/網頁 Email 軟體寄出</div>
+                  )}
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <button onClick={() => setEmailData(null)} className="px-4 py-2 border rounded bg-white hover:bg-gray-100 text-sm font-medium">取消</button>
+                    {!EMAIL_API_URL && (
+                        <button onClick={() => {
+                          const copyText = `收件人：${emailData.to}\n主旨：${emailData.subject}\n\n${emailData.body}`;
+                          const textArea = document.createElement("textarea");
+                          textArea.value = copyText;
+                          document.body.appendChild(textArea);
+                          textArea.select();
+                          try {
+                            document.execCommand('copy');
+                            showToast("📋 已複製信件內容！可手動貼上到您的信箱");
+                          } catch (err) {
+                            alert("複製失敗，請手動圈選複製");
+                          }
+                          document.body.removeChild(textArea);
+                        }} className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 font-bold text-sm shadow">📋 複製內容</button>
+                    )}
+                    {!EMAIL_API_URL && (
+                        <button onClick={() => {
+                          if (!emailData.to) return alert("請輸入收件人信箱");
+                          const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(emailData.to)}&su=${encodeURIComponent(emailData.subject)}&body=${encodeURIComponent(emailData.body)}`;
+                          window.open(gmailUrl, '_blank');
+                          setEmailData(null);
+                        }} className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 font-bold text-sm shadow flex items-center"><span className="emoji-icon mr-1">🌐</span> Gmail 網頁版</button>
+                    )}
+                    {!EMAIL_API_URL && (
+                        <button onClick={executeSendEmail} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 font-bold text-sm shadow">💻 電腦內建軟體</button>
+                    )}
+                    {EMAIL_API_URL && (
+                      <button onClick={executeSendEmail} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 font-bold text-sm shadow">自動發送 (API)</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function EditModal({ record, isAdd, defaultDate, onClose, onSave }) {
+      const [formData, setFormData] = useState(record || { date: defaultDate || new Date().toISOString().split('T')[0], period: '第1節', office: '', title: '', name: '', classId: '', teacher: '', violationCodes: ['✓'], remark: '', photo: null });
+      const handleChange = (e) => setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }));
+
+      const toggleModalViolation = (code) => {
+        setFormData(prev => {
+          let newCodes = [...(prev.violationCodes || [])];
+          if (code === '✓') {
+            newCodes = ['✓'];
+          } else {
+            newCodes = newCodes.filter(c => c !== '✓');
+            if (newCodes.includes(code)) {
+              newCodes = newCodes.filter(c => c !== code);
+              if (newCodes.length === 0) newCodes = ['✓'];
+            } else {
+              newCodes.push(code);
+            }
+          }
+          return { ...prev, violationCodes: newCodes };
+        });
+      };
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!formData.classId || !formData.date || !formData.office || !formData.name) return alert("必填欄位缺失");
+        if (formData.violationCodes.some(c => ['B', 'G', 'H'].includes(c)) && !formData.remark.trim()) {
+          return alert("您選擇了需要說明的代號(如B, G, H)，請務必填寫備註");
+        }
+        await onSave(formData);
+      };
+
+      return (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
+            <div className="p-4 border-b flex justify-between"><h3 className="font-bold">{isAdd ? '➕ 補充漏填' : '✏️ 修改紀錄'}</h3><button onClick={onClose} className="emoji-icon">❌</button></div>
+            <div className="p-6 overflow-y-auto">
+              <form id="edit-form" onSubmit={handleSubmit} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <input type="date" name="date" required value={formData.date} onChange={handleChange} className="border p-2 rounded w-full" />
+                  <input type="text" name="period" required value={formData.period} onChange={handleChange} className="border p-2 rounded w-full" />
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  <select name="office" required value={formData.office} onChange={handleChange} className="border p-2 rounded w-full"><option value="">處室</option>{OFFICES.map(o => <option key={o}>{o}</option>)}</select>
+                  <select name="title" value={formData.title} onChange={handleChange} className="border p-2 rounded w-full"><option value="">職稱</option>{TITLES.map(t => <option key={t}>{t}</option>)}</select>
+                  <input type="text" name="name" required placeholder="姓名" value={formData.name} onChange={handleChange} className="border p-2 rounded w-full" />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <input type="text" name="classId" required placeholder="班級" value={formData.classId} onChange={handleChange} className="border p-2 rounded w-full" />
+                  <input type="text" name="teacher" placeholder="老師" value={formData.teacher} onChange={handleChange} className="border p-2 rounded w-full" />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">狀況代號 (可複選)</label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {VIOLATIONS.map(v => {
+                      const isSelected = formData.violationCodes.includes(v.code);
+                      return (
+                        <button
+                          key={v.code} type="button" onClick={() => toggleModalViolation(v.code)} title={v.desc}
+                          className={`px-2 py-2 text-sm font-bold rounded-lg shadow-sm border transition-colors flex items-center justify-center ${isSelected ? (v.isNormal ? 'bg-green-600 text-white border-green-700' : 'bg-red-500 text-white border-red-600') : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
+                        >
+                          <span className="mr-1 opacity-70">[{v.code}]</span> {v.short}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <textarea name="remark" value={formData.remark} onChange={handleChange} rows="3" placeholder="備註說明" className="border p-2 rounded w-full mt-2"></textarea>
+              </form>
+            </div>
+            <div className="p-4 border-t flex justify-end space-x-3">
+              <button onClick={onClose} className="px-4 py-2 border rounded">取消</button>
+              <button type="submit" form="edit-form" className="px-4 py-2 bg-blue-600 text-white rounded">儲存</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
