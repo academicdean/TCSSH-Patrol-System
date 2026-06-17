@@ -84,7 +84,7 @@
       // ★ 新增：偵測是否使用 LINE/FB 等 App 內建瀏覽器
       const isInAppBrowser = useMemo(() => {
         const ua = navigator.userAgent || navigator.vendor || window.opera;
-        return (ua.indexOf('FBAN') > -1) || (ua.indexOf('FBAV') > -1) || (ua.indexOf('Line') > -1) || (ua.indexOf('Instagram') > -1);
+        return (ua.indexOf('FBAN') > -1) || (ua.indexOf('FBAV') > -1) || (ua.indexOf('Line') > -1) || (ua.indexOf('Instagram') > -1) || (ua.indexOf('MicroMessenger') > -1);
       }, []);
 
       const showToast = (msg) => {
@@ -113,15 +113,6 @@
           setIsAuthChecking(false);
         });
 
-        // 捕捉 Redirect 登入可能發生的錯誤 (加入 try-catch 防止在不支援的環境中當機)
-        try {
-          auth.getRedirectResult().catch(err => {
-            console.warn("跳轉登入檢查發生錯誤 (可忽略):", err);
-          });
-        } catch (e) {
-          console.warn("目前環境不支援 Redirect 檢查:", e);
-        }
-
         return () => unsubscribeAuth();
       }, []);
 
@@ -132,10 +123,12 @@
         // 改用 Popup 登入，因為它在預覽環境與多數手機瀏覽器中相容性較高
         auth.signInWithPopup(provider).catch(err => {
           if (err.code === 'auth/popup-blocked') {
-             alert("登入視窗被您的瀏覽器阻擋了。請允許彈出視窗，或點選右上角「以預設瀏覽器開啟」後再試一次。");
+             alert("登入視窗被您的瀏覽器阻擋了。\n請允許彈出視窗，或點選右上角「以預設瀏覽器開啟」後再試一次。");
+          } else if (err.code === 'auth/cancelled-popup-request' || err.code === 'auth/popup-closed-by-user') {
+             // 使用者自行關閉視窗，忽略即可
           } else {
              console.error("登入失敗", err);
-             alert("登入失敗：" + err.message);
+             alert("登入發生錯誤：" + err.message + "\n\n(若持續發生，請嘗試改用 Safari 或 Chrome 瀏覽器開啟)");
           }
         });
       };
