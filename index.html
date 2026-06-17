@@ -81,6 +81,12 @@
       const [isSyncing, setIsSyncing] = useState(true);
       const [toast, setToast] = useState(null);
 
+      // ★ 新增：偵測是否使用 LINE/FB 等 App 內建瀏覽器
+      const isInAppBrowser = useMemo(() => {
+        const ua = navigator.userAgent || navigator.vendor || window.opera;
+        return (ua.indexOf('FBAN') > -1) || (ua.indexOf('FBAV') > -1) || (ua.indexOf('Line') > -1) || (ua.indexOf('Instagram') > -1);
+      }, []);
+
       const showToast = (msg) => {
         setToast(msg);
         setTimeout(() => setToast(null), 3000);
@@ -202,14 +208,27 @@
           <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
             <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center border-t-4 border-blue-600">
               <div className="text-6xl mb-4 emoji-icon">🏫</div>
-              <h1 className="text-2xl font-bold text-gray-800 mb-2">臺中二中 巡堂系統</h1>
-              <p className="text-gray-600 mb-8 text-sm leading-relaxed">
-                為確保校園資料安全，本系統已啟用防護機制。<br/>
-                <span className="font-bold text-red-500">僅限本校教職員存取，外校人士無法進入。</span>
-              </p>
+              <h1 className="text-2xl font-bold text-gray-800 mb-4">臺中二中 巡堂系統</h1>
+              
+              {/* 防呆機制：若為 LINE 內建瀏覽器，顯示警告並鎖住按鈕 */}
+              {isInAppBrowser ? (
+                <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl mb-6 text-sm text-left">
+                  <div className="font-bold text-base mb-1 flex items-center"><span className="emoji-icon mr-1">⚠️</span> 請注意：瀏覽器不相容</div>
+                  您目前正使用 LINE 或其他通訊軟體的內建瀏覽器開啟。<br/><br/>
+                  Google 基於安全政策 (<span className="font-mono text-xs">403 disallowed_useragent</span>)，<b>禁止在通訊軟體內直接登入</b>。<br/><br/>
+                  👉 請點選畫面右上角(或右下角)的選單，選擇<b>「以預設瀏覽器開啟」</b>(如 Chrome 或 Safari) 即可順利登入！
+                </div>
+              ) : (
+                <p className="text-gray-600 mb-8 text-sm leading-relaxed">
+                  為確保校園資料安全，本系統已啟用防護機制。<br/>
+                  <span className="font-bold text-red-500">僅限本校教職員存取，外校人士無法進入。</span>
+                </p>
+              )}
+
               <button 
                 onClick={handleGoogleLogin} 
-                className="w-full bg-blue-600 text-white font-bold py-3.5 px-4 rounded-xl hover:bg-blue-700 transition-colors flex items-center justify-center shadow-md active:scale-95"
+                disabled={isInAppBrowser}
+                className={`w-full text-white font-bold py-3.5 px-4 rounded-xl transition-colors flex items-center justify-center shadow-md active:scale-95 ${isInAppBrowser ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
               >
                 <span className="mr-2 text-xl emoji-icon">🔐</span> 使用學校 Google 帳號登入
               </button>
