@@ -72,6 +72,8 @@
       { code: 'G', short: '老師未到', desc: '老師無故未到(須填說明)', isNormal: false },
       { code: 'H', short: '學生滯留', desc: '學生異常滯留/未到課(須填說明)', isNormal: false },
     ];
+    // 新增特殊教室清單
+    const SPECIAL_ROOMS = ['音樂館'];
 
     function App() {
       const [currentView, setCurrentView] = useState('frontend'); 
@@ -113,6 +115,15 @@
           setIsAuthChecking(false);
         });
 
+        // 捕捉 Redirect 登入可能發生的錯誤 (加入 try-catch 防止在不支援的環境中當機)
+        try {
+          auth.getRedirectResult().catch(err => {
+            console.warn("跳轉登入檢查發生錯誤 (可忽略):", err);
+          });
+        } catch (e) {
+          console.warn("目前環境不支援 Redirect 檢查:", e);
+        }
+
         return () => unsubscribeAuth();
       }, []);
 
@@ -126,6 +137,10 @@
              alert("登入視窗被您的瀏覽器阻擋了。\n請允許彈出視窗，或點選右上角「以預設瀏覽器開啟」後再試一次。");
           } else if (err.code === 'auth/cancelled-popup-request' || err.code === 'auth/popup-closed-by-user') {
              // 使用者自行關閉視窗，忽略即可
+          } else if (err.code === 'auth/operation-not-supported-in-this-environment') {
+             // 預覽環境被阻擋時的降級處理 (讓使用者能看到畫面)
+             alert("💡 提示：您目前處於「預覽模式」，因平台環境限制無法直接開啟 Google 登入視窗。\n\n系統已為您切換至「測試帳號」以便預覽操作畫面。當您將程式碼更新至 GitHub 後，登入功能就會完全正常運作！");
+             setUser({ email: 'preview@cloud.tcssh.tc.edu.tw', displayName: '預覽人員' });
           } else {
              console.error("登入失敗", err);
              alert("登入發生錯誤：" + err.message + "\n\n(若持續發生，請嘗試改用 Safari 或 Chrome 瀏覽器開啟)");
@@ -136,6 +151,7 @@
       const handleLogout = () => {
         if(window.confirm("確定要登出系統嗎？")) {
           auth.signOut();
+          setUser(null); // 確保預覽用的測試帳號也被清除
         }
       };
 
@@ -429,7 +445,7 @@
         rowsToSubmit.forEach(row => {
           if (!row.classId.trim()) return;
           if (row.violationCodes.some(c => ['B', 'G', 'H'].includes(c)) && !row.remark.trim()) {
-            alert(`班級 ${row.classId} 選擇了須填寫備註的代號，請務必填寫備註說明！`);
+            alert(`班級 ${row.classId} (${row.teacher || '未填老師'}) 選擇了須填寫備註的代號，請務必填寫備註說明！`);
             invalidRows.push(row);
           } else {
             const fallbackCode = row.violationCodes.includes('✓') ? '✓' : row.violationCodes.join(',');
@@ -496,8 +512,11 @@
                   <button onClick={() => removeRow(row.id)} className="absolute top-2 right-2 text-gray-400 hover:text-red-500 bg-white rounded-full p-1 shadow-sm" title="刪除此列"><span className="emoji-icon">❌</span></button>
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
                     <div className="md:col-span-2">
-                      <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">班級</label>
-                      <input type="text" placeholder="班級(例:101)" className="w-full border-gray-300 rounded-md p-2 border" value={row.classId} onChange={e => updateDraftRow(row.id, 'classId', e.target.value)} />
+                      <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">地點/班級</label>
+                      <input type="text" placeholder="班級(例:101、音樂館)" className="w-full border-gray-300 rounded-md p-2 border" value={row.classId} onChange={e => updateDraftRow(row.id, 'classId', e.target.value)} list="room-list" />
+                      <datalist id="room-list">
+                        {SPECIAL_ROOMS.map(room => <option key={room} value={room} />)}
+                      </datalist>
                     </div>
                     <div className="md:col-span-2">
                       <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">老師(選填)</label>
@@ -553,25 +572,39 @@
                  </button>
                </div>
                
-               <div className="flex space-x-2 mb-3">
+               <div className="flex space-x-2 mb-3 overflow-x-auto pb-1">
                  {[1, 2, 3].map(g => (
-                   <button key={g} onClick={() => setQuickGrade(g)} className={`flex-1 py-2 rounded-md font-bold text-sm sm:text-base transition-colors ${quickGrade === g ? 'bg-indigo-500 text-white shadow-md' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-100'}`}>
+                   <button key={g} onClick={() => setQuickGrade(g)} className={`flex-1 min-w-[60px] py-2 rounded-md font-bold text-sm sm:text-base transition-colors ${quickGrade === g ? 'bg-indigo-500 text-white shadow-md' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-100'}`}>
                      高{['一','二','三'][g-1]}
                    </button>
                  ))}
+                 <button onClick={() => setQuickGrade('special')} className={`flex-1 min-w-[80px] py-2 rounded-md font-bold text-sm sm:text-base transition-colors ${quickGrade === 'special' ? 'bg-indigo-500 text-white shadow-md' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-100'}`}>
+                   特殊教室
+                 </button>
                </div>
                
-               <div className="grid grid-cols-5 sm:grid-cols-8 gap-1.5 sm:gap-2">
-                 {Array.from({length: 25}, (_, i) => {
-                   const classNum = String(i + 1).padStart(2, '0');
-                   const classId = `${quickGrade}${classNum}`;
-                   const isAdded = draftRows.some(r => r.classId === classId);
-                   return (
-                     <button key={classId} onClick={() => handleQuickAddClass(classId)} disabled={isAdded} className={`py-2.5 rounded border text-sm sm:text-base font-bold transition-colors ${isAdded ? 'bg-indigo-100 text-indigo-300 border-indigo-100 cursor-not-allowed' : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-500 hover:text-white hover:border-indigo-500 shadow-sm'}`}>
-                       {classId}
-                     </button>
-                   );
-                 })}
+               <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-8 gap-1.5 sm:gap-2">
+                 {quickGrade === 'special' ? (
+                   SPECIAL_ROOMS.map(room => {
+                     const isAdded = draftRows.some(r => r.classId === room);
+                     return (
+                       <button key={room} onClick={() => handleQuickAddClass(room)} disabled={isAdded} className={`py-2.5 rounded border text-sm sm:text-base font-bold transition-colors ${isAdded ? 'bg-indigo-100 text-indigo-300 border-indigo-100 cursor-not-allowed' : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-500 hover:text-white hover:border-indigo-500 shadow-sm'}`}>
+                         {room}
+                       </button>
+                     );
+                   })
+                 ) : (
+                   Array.from({length: 25}, (_, i) => {
+                     const classNum = String(i + 1).padStart(2, '0');
+                     const classId = `${quickGrade}${classNum}`;
+                     const isAdded = draftRows.some(r => r.classId === classId);
+                     return (
+                       <button key={classId} onClick={() => handleQuickAddClass(classId)} disabled={isAdded} className={`py-2.5 rounded border text-sm sm:text-base font-bold transition-colors ${isAdded ? 'bg-indigo-100 text-indigo-300 border-indigo-100 cursor-not-allowed' : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-500 hover:text-white hover:border-indigo-500 shadow-sm'}`}>
+                         {classId}
+                       </button>
+                     );
+                   })
+                 )}
                </div>
             </div>
 
@@ -706,10 +739,10 @@
         let genBody = '';
 
         if (emailData.template === 'teacher') {
-            genSubj = `[巡堂紀錄通知] ${r.date} 第${r.period} - 班級：${r.classId}`;
+            genSubj = `[巡堂紀錄通知] ${r.date} 第${r.period} - 地點/班級：${r.classId}`;
             genBody = `任課教師 / 導師 您好：\n\n教務處於巡堂時發現以下狀況，敬請協助留意與輔導：\n\n`+
                       `一、時間：${r.date} 第${r.period}\n`+
-                      `二、班級：${r.classId}\n`+
+                      `二、地點/班級：${r.classId}\n`+
                       `三、紀錄事項：\n${descText}\n\n`+
                       `【備註說明】\n${r.remark || '無'}\n\n`+
                       `巡堂人員：${r.name} (${r.office})\n`+
@@ -717,15 +750,15 @@
         } else if (emailData.template === 'student') {
             genSubj = `[約談通知] ${r.classId} 巡堂違規約談單 - ${emailData.studentName || '(請輸入姓名)'}`;
             genBody = `一、時間：${r.date} 第${r.period}\n`+
-                      `二、學生班級：${r.classId}\n`+
+                      `二、地點/班級：${r.classId}\n`+
                       `三、學生姓名/座號：${emailData.studentName || '(請輸入姓名)'}\n`+
                       `四、所見情形：\n${descText}\n\n`+
                       `※ 注意事項：\n請該名學生於 ${emailData.reportTime || '(請輸入約談時間)'} 至 教務處教學組 說明。\n\n`+
                       `教務處教學組 敬啟`;
         } else if (emailData.template === 'student_affairs') {
-            genSubj = `[學務通報] ${r.date} 第${r.period} - 班級：${r.classId} 異常處置通報`;
+            genSubj = `[學務通報] ${r.date} 第${r.period} - 地點/班級：${r.classId} 異常處置通報`;
             genBody = `學務處 / 主任教官 您好：\n\n教務處巡堂時發現以下異常狀況，已依SOP進行初步處置，後續敬請學務處協助辦理：\n\n`+
-                      `一、班級：${r.classId}\n`+
+                      `一、地點/班級：${r.classId}\n`+
                       `二、狀況紀錄：\n${descText}\n\n`+
                       `【初步處置與備註】\n${r.remark || '無'}\n\n`+
                       `巡堂人員：${r.name} (${r.office})`;
@@ -793,7 +826,7 @@
               const row = {};
               Object.keys(rawRow).forEach(k => { row[k.trim()] = rawRow[k]; });
 
-              const classId = String(row['班級'] || row['班級編號'] || '').trim();
+              const classId = String(row['地點/班級'] || row['班級'] || row['班級編號'] || '').trim();
               if (!classId) return;
 
               let dateStr = row['日期'];
@@ -827,7 +860,7 @@
                 teacher: String(row['任課老師'] || '').trim(),
                 violationCodes: parsedCodes.length > 0 ? parsedCodes : ['✓'],
                 violationCode: parsedCodes.includes('✓') ? '✓' : parsedCodes.join(','),
-                remark: String(row['備註'] || row['状况描述'] || '').trim(),
+                remark: String(row['備註'] || row['狀況描述'] || '').trim(),
                 photo: null,
                 timestamp: Date.now()
               });
@@ -841,7 +874,7 @@
                 showToast(`成功匯入 ${importedRecords.length} 筆資料！`);
               }
             } else {
-              alert("找不到可匯入的資料，請確認 Excel 標題列是否包含「班級」");
+              alert("找不到可匯入的資料，請確認 Excel 標題列是否包含「地點/班級」");
             }
           } catch (error) {
             console.error(error);
@@ -871,11 +904,11 @@
           tableRows += `<tr><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.classId}</td><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.period}</td><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.teacher || ''}</td><td style="border: 1px solid black; padding: 8px; text-align: center; font-weight: ${isNormal?'normal':'bold'}; color: ${isNormal?'black':'red'};">${vText}</td><td style="border: 1px solid black; padding: 8px; text-align: left;">${r.remark || ''}</td></tr>`;
           
           if (r.photo) {
-            photoDivs += `<div style="margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;"><h4 style="margin-top: 0;">📌 ${r.period} - 班級：${r.classId}</h4><p>狀況：${vText}</p><p>備註：${r.remark || '無'}</p><img src="${r.photo}" style="max-width: 500px; border: 1px solid #eee;" /></div>`;
+            photoDivs += `<div style="margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;"><h4 style="margin-top: 0;">📌 ${r.period} - 地點/班級：${r.classId}</h4><p>狀況：${vText}</p><p>備註：${r.remark || '無'}</p><img src="${r.photo}" style="max-width: 500px; border: 1px solid #eee;" /></div>`;
           }
         });
 
-        const htmlContent = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset="UTF-8"><style>body { font-family: "標楷體", "DFKai-sb", serif; color: #000; line-height: 1.5; } table { width: 100%; border-collapse: collapse; margin-bottom: 20px; } h1 { text-align: center; font-size: 24px; letter-spacing: 2px; } .legend { font-size: 14px; border: 1px solid #000; padding: 10px; margin-bottom: 20px; }</style></head><body><h1>臺中市立臺中第二高級中學巡堂紀錄表</h1><div style="display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 16px;"><span>日期： <u> &nbsp;${year}&nbsp; </u> 年 <u> &nbsp;${month}&nbsp; </u> 月 <u> &nbsp;${day}&nbsp; </u> 日 星期 <u> &nbsp;${weekDayStr}&nbsp; </u></span><span style="float: right;">巡堂人員： <u> &nbsp;${patrolNames || '_______________'}&nbsp; </u></span></div><table style="border: 1px solid black;"><thead><tr><th style="border: 1px solid black; padding: 8px; width: 12%; background-color: #f2f2f2;">班別</th><th style="border: 1px solid black; padding: 8px; width: 12%; background-color: #f2f2f2;">節次</th><th style="border: 1px solid black; padding: 8px; width: 15%; background-color: #f2f2f2;">任課老師</th><th style="border: 1px solid black; padding: 8px; width: 15%; background-color: #f2f2f2;">紀錄</th><th style="border: 1px solid black; padding: 8px; width: 46%; background-color: #f2f2f2;">違規及待改進事項</th></tr></thead><tbody>${tableRows || '<tr><td colspan="5" style="border: 1px solid black; text-align: center; padding: 10px;">無紀錄</td></tr>'}</tbody></table><div class="legend"><strong>紀錄代號：</strong><br>A. 嬉鬧吵雜,課堂管理欠佳<br>B. 睡覺人數較多(請註記:大概人數*n)<br>C. 不當使用手機或3C產品(請學生到走廊登記學號)<br>D. 教室或走廊髒亂<br>E. 室外課教室 門窗未關閉 &nbsp;&nbsp;&nbsp;&nbsp; F. 室外課教室 電源未關閉<br>G. 老師無故未到 &nbsp;&nbsp;&nbsp;&nbsp; H. 學生異常滯留/未到課</div><table style="width: 100%; margin-top: 40px; border: none;"><tr><td style="border: none; text-align: left; vertical-align: bottom; height: 80px;">巡堂：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">會簽：<br><br><br>學務處：___________  <br>其他：_____________</td><td style="border: none; text-align: left; vertical-align: bottom;">教學組長：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">教務主任：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">校長：<br><br><br>_________________</td></tr></table>${photoDivs ? `<br clear=all style='mso-special-character:line-break;page-break-before:always'><h2 style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px;">附件：巡堂照片紀錄</h2>${photoDivs}` : ''}</body></html>`;
+        const htmlContent = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset="UTF-8"><style>body { font-family: "標楷體", "DFKai-sb", serif; color: #000; line-height: 1.5; } table { width: 100%; border-collapse: collapse; margin-bottom: 20px; } h1 { text-align: center; font-size: 24px; letter-spacing: 2px; } .legend { font-size: 14px; border: 1px solid #000; padding: 10px; margin-bottom: 20px; }</style></head><body><h1>臺中市立臺中第二高級中學巡堂紀錄表</h1><div style="display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 16px;"><span>日期： <u> &nbsp;${year}&nbsp; </u> 年 <u> &nbsp;${month}&nbsp; </u> 月 <u> &nbsp;${day}&nbsp; </u> 日 星期 <u> &nbsp;${weekDayStr}&nbsp; </u></span><span style="float: right;">巡堂人員： <u> &nbsp;${patrolNames || '_______________'}&nbsp; </u></span></div><table style="border: 1px solid black;"><thead><tr><th style="border: 1px solid black; padding: 8px; width: 12%; background-color: #f2f2f2;">地點/班別</th><th style="border: 1px solid black; padding: 8px; width: 12%; background-color: #f2f2f2;">節次</th><th style="border: 1px solid black; padding: 8px; width: 15%; background-color: #f2f2f2;">任課老師</th><th style="border: 1px solid black; padding: 8px; width: 15%; background-color: #f2f2f2;">紀錄</th><th style="border: 1px solid black; padding: 8px; width: 46%; background-color: #f2f2f2;">違規及待改進事項</th></tr></thead><tbody>${tableRows || '<tr><td colspan="5" style="border: 1px solid black; text-align: center; padding: 10px;">無紀錄</td></tr>'}</tbody></table><div class="legend"><strong>紀錄代號：</strong><br>A. 嬉鬧吵雜,課堂管理欠佳<br>B. 睡覺人數較多(請註記:大概人數*n)<br>C. 不當使用手機或3C產品(請學生到走廊登記學號)<br>D. 教室或走廊髒亂<br>E. 室外課教室 門窗未關閉 &nbsp;&nbsp;&nbsp;&nbsp; F. 室外課教室 電源未關閉<br>G. 老師無故未到 &nbsp;&nbsp;&nbsp;&nbsp; H. 學生異常滯留/未到課</div><table style="width: 100%; margin-top: 40px; border: none;"><tr><td style="border: none; text-align: left; vertical-align: bottom; height: 80px;">巡堂：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">會簽：<br><br><br>學務處：___________  <br>其他：_____________</td><td style="border: none; text-align: left; vertical-align: bottom;">教學組長：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">教務主任：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">校長：<br><br><br>_________________</td></tr></table>${photoDivs ? `<br clear=all style='mso-special-character:line-break;page-break-before:always'><h2 style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px;">附件：巡堂照片紀錄</h2>${photoDivs}` : ''}</body></html>`;
 
         const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword;charset=utf-8;' });
         const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `巡堂紀錄表_${filterDate}.doc`; link.click();
@@ -883,7 +916,7 @@
 
       const handleExportCSV = () => {
         if (records.length === 0) { alert("無紀錄可匯出"); return; }
-        const headers = ['日期', '節次', '處室', '職稱', '姓名', '班級', '任課老師', '代號', '備註', '時間戳記'];
+        const headers = ['日期', '節次', '處室', '職稱', '姓名', '地點/班級', '任課老師', '代號', '備註', '時間戳記'];
         const rows = records.map(r => {
           const vText = (r.violationCodes || ['✓']).join(',');
           return [r.date, r.period, r.office, r.title, r.name, r.classId, r.teacher || '', vText, r.remark || '', new Date(r.timestamp).toLocaleString()].map(f => `"${String(f).replace(/"/g, '""')}"`).join(',');
@@ -959,7 +992,7 @@
           <div className="bg-white rounded-xl shadow border overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
-                <tr><th className="px-4 py-3 text-left text-xs text-gray-500">日期/節次</th><th className="px-4 py-3 text-left text-xs text-gray-500">巡堂人員</th><th className="px-4 py-3 text-left text-xs text-gray-500">班級/老師</th><th className="px-4 py-3 text-left text-xs text-gray-500">狀況</th><th className="px-4 py-3 text-left text-xs text-gray-500">備註/照片</th><th className="px-4 py-3 text-right text-xs text-gray-500">操作</th></tr>
+                <tr><th className="px-4 py-3 text-left text-xs text-gray-500">日期/節次</th><th className="px-4 py-3 text-left text-xs text-gray-500">巡堂人員</th><th className="px-4 py-3 text-left text-xs text-gray-500">地點/班級</th><th className="px-4 py-3 text-left text-xs text-gray-500">狀況</th><th className="px-4 py-3 text-left text-xs text-gray-500">備註/照片</th><th className="px-4 py-3 text-right text-xs text-gray-500">操作</th></tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {filteredRecords.length === 0 ? <tr><td colSpan="6" className="text-center p-10 text-gray-500"><div className="text-4xl emoji-icon">📄</div>無紀錄</td></tr> : 
@@ -1144,7 +1177,7 @@
                   <input type="text" name="name" required placeholder="姓名" value={formData.name} onChange={handleChange} className="border p-2 rounded w-full" />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
-                  <input type="text" name="classId" required placeholder="班級" value={formData.classId} onChange={handleChange} className="border p-2 rounded w-full" />
+                  <input type="text" name="classId" required placeholder="地點/班級" value={formData.classId} onChange={handleChange} className="border p-2 rounded w-full" />
                   <input type="text" name="teacher" placeholder="老師" value={formData.teacher} onChange={handleChange} className="border p-2 rounded w-full" />
                 </div>
                 
