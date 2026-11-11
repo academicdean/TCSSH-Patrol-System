@@ -37,7 +37,7 @@
 
   <!-- React 應用程式代碼 -->
   <script type="text/babel">
-    const { useState, useEffect, useMemo, useRef } = React;
+    const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
     // ==========================================
     // 1. 雲端資料庫初始化 (Firebase)
@@ -74,6 +74,9 @@
     ];
     // 新增特殊教室清單
     const SPECIAL_ROOMS = ['音樂館'];
+    
+    // ★ Phase 1: 新增常用情境快捷標籤
+    const QUICK_TAGS = ['常規良好', '自習專案進行', '無人教室已關電源', '設備故障', '投影異常', '需教學組協處'];
 
     function App() {
       const [currentView, setCurrentView] = useState('frontend'); 
@@ -83,7 +86,7 @@
       const [isSyncing, setIsSyncing] = useState(true);
       const [toast, setToast] = useState(null);
 
-      // ★ 新增：偵測是否使用 LINE/FB 等 App 內建瀏覽器
+      // ★ 偵測是否使用 LINE/FB 等 App 內建瀏覽器
       const isInAppBrowser = useMemo(() => {
         const ua = navigator.userAgent || navigator.vendor || window.opera;
         return (ua.indexOf('FBAN') > -1) || (ua.indexOf('FBAV') > -1) || (ua.indexOf('Line') > -1) || (ua.indexOf('Instagram') > -1) || (ua.indexOf('MicroMessenger') > -1);
@@ -115,7 +118,7 @@
           setIsAuthChecking(false);
         });
 
-        // 捕捉 Redirect 登入可能發生的錯誤 (加入 try-catch 防止在不支援的環境中當機)
+        // 捕捉 Redirect 登入可能發生的錯誤
         try {
           auth.getRedirectResult().catch(err => {
             console.warn("跳轉登入檢查發生錯誤 (可忽略):", err);
@@ -301,10 +304,10 @@
     function FrontendView({ addRecords, showToast, isSyncing, user }) {
       const todayStr = new Date().toISOString().split('T')[0];
       
-      // ★ 新增：時間與節次自動判別邏輯 ★
+      // 時間與節次自動判別邏輯
       const guessCurrentPeriod = () => {
           const now = new Date();
-          const time = now.getHours() * 100 + now.getMinutes(); // 產生如 1030 的時間格式
+          const time = now.getHours() * 100 + now.getMinutes();
           if (time >= 800 && time < 905) return '第1節';
           if (time >= 905 && time < 1005) return '第2節';
           if (time >= 1005 && time < 1105) return '第3節';
@@ -314,10 +317,10 @@
           if (time >= 1355 && time < 1455) return '第6節';
           if (time >= 1455 && time < 1605) return '第7節';
           if (time >= 1605 && time < 1715) return '第8節';
-          return '第1節'; // 預設值
+          return '第1節';
       };
 
-      // ★ 新增：基本資料自動記憶 (LocalStorage) 結合 Google 姓名帶入 ★
+      // 基本資料自動記憶
       const [basicInfo, setBasicInfo] = useState(() => {
         const savedProfile = localStorage.getItem('tcssh_profile');
         let defaultOffice = '';
@@ -342,7 +345,6 @@
         };
       });
 
-      // 當使用者修改基本資料時，自動將偏好設定永久記錄在手機裡
       useEffect(() => {
         localStorage.setItem('tcssh_profile', JSON.stringify({
           office: basicInfo.office,
@@ -352,7 +354,30 @@
       }, [basicInfo.office, basicInfo.title, basicInfo.name]);
 
       const getEmptyRow = () => ({ id: crypto.randomUUID(), classId: '', teacher: '', violationCodes: ['✓'], remark: '', photo: null });
-      const [draftRows, setDraftRows] = useState([getEmptyRow()]);
+      
+      // ★ Phase 1: 表單草稿防呆機制 (Auto-Save)
+      const [draftRows, setDraftRows] = useState(() => {
+        const savedDrafts = localStorage.getItem('tcssh_draft_rows');
+        if (savedDrafts) {
+          try {
+            const parsed = JSON.parse(savedDrafts);
+            if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+          } catch(e) { console.error("解析草稿失敗", e); }
+        }
+        return [getEmptyRow()];
+      });
+
+      // 當草稿變更時，自動存入 localStorage
+      useEffect(() => {
+        // 只有當草稿真的有內容時才存檔，避免存入空白覆蓋掉有用的資料
+        const hasContent = draftRows.some(row => row.classId !== '' || row.remark !== '' || row.violationCodes[0] !== '✓');
+        if (hasContent) {
+           localStorage.setItem('tcssh_draft_rows', JSON.stringify(draftRows));
+        } else {
+           localStorage.removeItem('tcssh_draft_rows');
+        }
+      }, [draftRows]);
+
       const [isSubmitting, setIsSubmitting] = useState(false);
       
       const [quickGrade, setQuickGrade] = useState(1);
@@ -390,7 +415,24 @@
       };
 
       const updateBasicInfo = (field, value) => setBasicInfo(prev => ({ ...prev, [field]: value }));
-      const updateDraftRow = (id, field, value) => setDraftRows(prev => prev.map(row => row.id === id ? { ...row, [field]: value } : row));
+      
+      // 使用 useCallback 確保函數參考不會在每次渲染改變，提升效能
+      const updateDraftRow = useCallback((id, field, value) => {
+        setDraftRows(prev => prev.map(row => row.id === id ? { ...row, [field]: value } : row));
+      }, []);
+
+      // ★ Phase 1: 快捷標籤的處理邏輯
+      const handleQuickTagClick = useCallback((id, tag) => {
+        setDraftRows(prev => prev.map(row => {
+          if (row.id !== id) return row;
+          const currentRemark = row.remark || '';
+          // 若備註已經包含該標籤則不重複加入，否則串接
+          if (currentRemark.includes(tag)) return row;
+          const newRemark = currentRemark ? `${currentRemark}, ${tag}` : tag;
+          return { ...row, remark: newRemark };
+        }));
+      }, []);
+
       const addRow = () => setDraftRows(prev => [...prev, getEmptyRow()]);
       const removeRow = (id) => {
         if (draftRows.length === 1) setDraftRows([getEmptyRow()]);
@@ -445,7 +487,7 @@
         rowsToSubmit.forEach(row => {
           if (!row.classId.trim()) return;
           if (row.violationCodes.some(c => ['B', 'G', 'H'].includes(c)) && !row.remark.trim()) {
-            alert(`班級 ${row.classId} (${row.teacher || '未填老師'}) 選擇了須填寫備註的代號，請務必填寫備註說明！`);
+            alert(`地點/班級 ${row.classId} 選擇了須填寫備註的代號，請務必填寫備註說明！`);
             invalidRows.push(row);
           } else {
             const fallbackCode = row.violationCodes.includes('✓') ? '✓' : row.violationCodes.join(',');
@@ -454,15 +496,24 @@
         });
 
         if (validRows.length === 0) {
-          if (invalidRows.length === 0) alert("請至少填寫一個班級編號。");
+          if (invalidRows.length === 0) alert("請至少填寫一個班級或地點。");
           setIsSubmitting(false); return;
         }
 
         try {
           await addRecords(validRows);
           showToast(`已成功送出 ${validRows.length} 筆紀錄至雲端！`);
+          
+          // 清除送出成功的草稿，保留未完成的
           const remainingDrafts = draftRows.filter(draft => !validRows.some(valid => valid.id === draft.id));
-          setDraftRows(remainingDrafts.length > 0 ? remainingDrafts : [getEmptyRow()]);
+          const newDrafts = remainingDrafts.length > 0 ? remainingDrafts : [getEmptyRow()];
+          setDraftRows(newDrafts);
+          
+          // 若全部清空，同時清除 localStorage
+          if(remainingDrafts.length === 0) {
+             localStorage.removeItem('tcssh_draft_rows');
+          }
+          
           window.scrollTo({ top: 0, behavior: 'smooth' });
         } catch (err) {
           alert("送出失敗，請確認網路連線！"); console.error(err);
@@ -513,17 +564,17 @@
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
                     <div className="md:col-span-2">
                       <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">地點/班級</label>
-                      <input type="text" placeholder="班級(例:101、音樂館)" className="w-full border-gray-300 rounded-md p-2 border" value={row.classId} onChange={e => updateDraftRow(row.id, 'classId', e.target.value)} list="room-list" />
+                      <input type="text" placeholder="班級(例:101、音樂館)" className="w-full border-gray-300 rounded-md p-2 border focus:ring-blue-500 focus:border-blue-500" value={row.classId} onChange={e => updateDraftRow(row.id, 'classId', e.target.value)} list="room-list" />
                       <datalist id="room-list">
                         {SPECIAL_ROOMS.map(room => <option key={room} value={room} />)}
                       </datalist>
                     </div>
                     <div className="md:col-span-2">
                       <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">老師(選填)</label>
-                      <input type="text" placeholder="老師" className="w-full border-gray-300 rounded-md p-2 border" value={row.teacher} onChange={e => updateDraftRow(row.id, 'teacher', e.target.value)} />
+                      <input type="text" placeholder="老師" className="w-full border-gray-300 rounded-md p-2 border focus:ring-blue-500 focus:border-blue-500" value={row.teacher} onChange={e => updateDraftRow(row.id, 'teacher', e.target.value)} />
                     </div>
                     
-                    <div className="md:col-span-3">
+                    <div className="md:col-span-4">
                       <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">狀況代號(可點擊複選)</label>
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-1">
                         {VIOLATIONS.map(v => {
@@ -540,22 +591,39 @@
                       </div>
                     </div>
 
-                    <div className="md:col-span-3">
-                      <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">備註</label>
-                      <input type="text" placeholder={requiresRemark ? "必填！說明人數或狀況" : "備註"} className={`w-full border-gray-300 rounded-md p-2 border ${requiresRemark && !row.remark ? 'border-red-400 bg-red-50' : ''}`} value={row.remark} onChange={e => updateDraftRow(row.id, 'remark', e.target.value)} />
+                    <div className="md:col-span-4 space-y-2">
+                      <label className="block text-xs font-medium text-gray-500 md:hidden">備註與快捷標籤</label>
+                      
+                      {/* ★ Phase 1: 常見情境快捷標籤 */}
+                      <div className="flex flex-wrap gap-1.5 mb-2">
+                        {QUICK_TAGS.map(tag => (
+                           <button 
+                             key={tag} type="button" 
+                             onClick={() => handleQuickTagClick(row.id, tag)}
+                             className="px-2 py-1 text-[10px] sm:text-xs bg-gray-200 text-gray-700 rounded-full hover:bg-gray-300 transition-colors border border-gray-300 whitespace-nowrap"
+                           >
+                             + {tag}
+                           </button>
+                        ))}
+                      </div>
+
+                      <div className="flex gap-2">
+                        <input type="text" placeholder={requiresRemark ? "必填！說明人數或狀況" : "可自訂輸入備註..."} className={`w-full border-gray-300 rounded-md p-2 border focus:ring-blue-500 focus:border-blue-500 ${requiresRemark && !row.remark ? 'border-red-400 bg-red-50' : ''}`} value={row.remark} onChange={e => updateDraftRow(row.id, 'remark', e.target.value)} />
+                        
+                        <label className="cursor-pointer text-gray-500 flex flex-col items-center justify-center min-w-[40px]">
+                          {row.photo ? <img src={row.photo} className="w-8 h-8 object-cover rounded-md border" /> : <span className="text-xl emoji-icon">📷</span>}
+                          <span className="text-[10px] mt-0.5">{row.photo ? '重選' : '拍照'}</span>
+                          <input type="file" accept="image/*" capture="environment" className="hidden" onChange={e => handlePhotoUpload(e, row.id)} />
+                        </label>
+                        
+                        <div className="flex items-center">
+                          <button onClick={() => submitRecords([row])} disabled={!row.classId || isSubmitting} className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700 disabled:bg-gray-300 shadow-sm flex justify-center items-center h-full w-10">
+                            <span className="emoji-icon">📤</span>
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                    <div className="md:col-span-1 flex justify-center">
-                      <label className="cursor-pointer text-gray-500 flex flex-col items-center">
-                        {row.photo ? <img src={row.photo} className="w-10 h-10 object-cover rounded-md border" /> : <span className="text-2xl emoji-icon">📷</span>}
-                        <span className="text-[10px] mt-1">{row.photo ? '重選' : '拍照'}</span>
-                        <input type="file" accept="image/*" capture="environment" className="hidden" onChange={e => handlePhotoUpload(e, row.id)} />
-                      </label>
-                    </div>
-                    <div className="md:col-span-1 flex items-center h-full mt-2 md:mt-0">
-                      <button onClick={() => submitRecords([row])} disabled={!row.classId || isSubmitting} className="w-full bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700 disabled:bg-gray-300 shadow-sm flex justify-center">
-                        <span className="emoji-icon">📤</span> <span className="md:hidden ml-1">送出</span>
-                      </button>
-                    </div>
+
                   </div>
                 </div>
               )})}
