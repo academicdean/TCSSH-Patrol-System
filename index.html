@@ -2,11 +2,11 @@
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>臺中二中 巡堂紀錄系統</title>
   
-  <!-- ★ Phase 3: 引入 PWA 設定檔與圖示 -->
-  <link rel="manifest" href="manifest.json">
+  <!-- PWA 設定 -->
+  <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#1e40af">
   <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏫</text></svg>">
   
@@ -35,6 +35,17 @@
     /* 避免 emoji 在某些裝置顯示過小 */
     .emoji-icon { font-family: "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; }
   </style>
+
+  <!-- 註冊 Service Worker (PWA 離線機制) -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./service-worker.js').catch(err => {
+          console.log('ServiceWorker 註冊失敗 (預覽環境可忽略): ', err);
+        });
+      });
+    }
+  </script>
 </head>
 <body class="bg-gray-50 text-gray-800 font-sans">
   
@@ -43,15 +54,6 @@
   <!-- React 應用程式代碼 -->
   <script type="text/babel">
     const { useState, useEffect, useMemo, useRef, useCallback } = React;
-
-    // ★ Phase 3: 註冊 Service Worker
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('service-worker.js')
-          .then(registration => console.log('ServiceWorker 註冊成功'))
-          .catch(err => console.log('ServiceWorker 註冊失敗: ', err));
-      });
-    }
 
     // ==========================================
     // 1. 雲端資料庫初始化 (Firebase)
@@ -69,17 +71,14 @@
     firebase.initializeApp(firebaseConfig);
     const auth = firebase.auth();
     const db = firebase.firestore();
-    // ★ Phase 3: 啟用 Firestore 內建的離線持久化支援
-    db.enablePersistence({ synchronizeTabs: true })
-      .catch((err) => {
-        if (err.code == 'failed-precondition') {
-          console.warn("多個分頁開啟，離線模式可能受限");
-        } else if (err.code == 'unimplemented') {
-          console.warn("目前瀏覽器不支援離線快取");
-        }
-      });
-      
     const APP_ID = 'tcssh-patrol-system';
+
+    // ★ 管理員白名單：只有這些信箱登入時，才會顯示「後台端」
+    const ADMIN_EMAILS = [
+      'academic_dean@cloud.tcssh.tc.edu.tw',
+      'vh68@cloud.tcssh.tc.edu.tw',
+      'preview@cloud.tcssh.tc.edu.tw' // 預留給預覽模式測試用
+    ];
 
     // 系統設定常數
     const OFFICES = ['校長室', '教務處', '學務處', '總務處', '輔導處', '圖書館'];
@@ -96,18 +95,19 @@
       { code: 'G', short: '老師未到', desc: '老師無故未到(須填說明)', isNormal: false },
       { code: 'H', short: '學生滯留', desc: '學生異常滯留/未到課(須填說明)', isNormal: false },
     ];
-    // 新增特殊教室清單
-    const SPECIAL_ROOMS = ['音樂館'];
     
-    // ★ Phase 1: 新增常用情境快捷標籤
+    // ★ 常用情境快捷標籤
     const QUICK_TAGS = ['常規良好', '自習專案進行', '無人教室已關電源', '設備故障', '投影異常', '需教學組協處'];
 
-    // ★ Phase 2: 管理員白名單 (請將負責後台管理的信箱加入此陣列)
-    const ADMIN_EMAILS = [
-      'academic_dean@cloud.tcssh.tc.edu.tw', 
-      'vh68@cloud.tcssh.tc.edu.tw', 
-      'preview@cloud.tcssh.tc.edu.tw' // 保留預覽測試帳號
-    ];
+    // ★ 校園實體空間導向 (動線選單)
+    const CAMPUS_BUILDINGS = ['高一(萃英樓)', '高二(明德樓)', '高三(弘道樓)', '專科與特殊', '公共區域'];
+    const CAMPUS_ROOMS = {
+      '高一(萃英樓)': Array.from({length: 23}, (_, i) => `1${String(i + 1).padStart(2, '0')}`),
+      '高二(明德樓)': Array.from({length: 23}, (_, i) => `2${String(i + 1).padStart(2, '0')}`),
+      '高三(弘道樓)': Array.from({length: 23}, (_, i) => `3${String(i + 1).padStart(2, '0')}`),
+      '專科與特殊': ['音樂館', '美術教室', '生活科技教室', '物理實驗室', '化學實驗室', '生物實驗室', '地球科學教室', '家政教室', '電腦教室', '圖書館', '體育館', '游泳池'],
+      '公共區域': ['操場', '籃球場', '排球場', '合作社', '學生餐廳', '中庭', '走廊']
+    };
 
     function App() {
       const [currentView, setCurrentView] = useState('frontend'); 
@@ -115,10 +115,10 @@
       const [user, setUser] = useState(null);
       const [isAuthChecking, setIsAuthChecking] = useState(true);
       const [isSyncing, setIsSyncing] = useState(true);
-      const [toast, setToast] = useState(null);
-      
-      // ★ Phase 3: 監聽網路連線狀態
       const [isOnline, setIsOnline] = useState(navigator.onLine);
+      const [toast, setToast] = useState(null);
+
+      // 偵測網路狀態 (PWA 離線機制)
       useEffect(() => {
         const handleOnline = () => setIsOnline(true);
         const handleOffline = () => setIsOnline(false);
@@ -130,10 +130,6 @@
         };
       }, []);
 
-      // ★ 判斷當前登入者是否為管理員
-      const isAdmin = user && ADMIN_EMAILS.includes(user.email);
-
-      // ★ 偵測是否使用 LINE/FB 等 App 內建瀏覽器
       const isInAppBrowser = useMemo(() => {
         const ua = navigator.userAgent || navigator.vendor || window.opera;
         return (ua.indexOf('FBAN') > -1) || (ua.indexOf('FBAV') > -1) || (ua.indexOf('Line') > -1) || (ua.indexOf('Instagram') > -1) || (ua.indexOf('MicroMessenger') > -1);
@@ -144,13 +140,10 @@
         setTimeout(() => setToast(null), 3000);
       };
 
-      // ==========================================
-      // ★ 嚴格學校帳號驗證區塊 ★
-      // ==========================================
+      // 嚴格學校帳號驗證區塊
       useEffect(() => {
         const unsubscribeAuth = auth.onAuthStateChanged((currentUser) => {
           if (currentUser) {
-            // 檢查信箱網域是否為二中 (cloud.tcssh.tc.edu.tw)
             if (currentUser.email && currentUser.email.endsWith('@cloud.tcssh.tc.edu.tw')) {
               setUser(currentUser);
             } else {
@@ -164,36 +157,24 @@
           }
           setIsAuthChecking(false);
         });
-
-        // 捕捉 Redirect 登入可能發生的錯誤
-        try {
-          auth.getRedirectResult().catch(err => {
-            console.warn("跳轉登入檢查發生錯誤 (可忽略):", err);
-          });
-        } catch (e) {
-          console.warn("目前環境不支援 Redirect 檢查:", e);
-        }
-
         return () => unsubscribeAuth();
       }, []);
 
       const handleGoogleLogin = () => {
         const provider = new firebase.auth.GoogleAuthProvider();
-        provider.setCustomParameters({ hd: 'cloud.tcssh.tc.edu.tw' }); // 自動過濾只顯示學校帳號
+        provider.setCustomParameters({ hd: 'cloud.tcssh.tc.edu.tw' }); 
         
-        // 改用 Popup 登入，因為它在預覽環境與多數手機瀏覽器中相容性較高
         auth.signInWithPopup(provider).catch(err => {
           if (err.code === 'auth/popup-blocked') {
              alert("登入視窗被您的瀏覽器阻擋了。\n請允許彈出視窗，或點選右上角「以預設瀏覽器開啟」後再試一次。");
           } else if (err.code === 'auth/cancelled-popup-request' || err.code === 'auth/popup-closed-by-user') {
-             // 使用者自行關閉視窗，忽略即可
+             // 取消登入忽略
           } else if (err.code === 'auth/operation-not-supported-in-this-environment') {
-             // 預覽環境被阻擋時的降級處理 (讓使用者能看到畫面)
-             alert("💡 提示：您目前處於「預覽模式」，因平台環境限制無法直接開啟 Google 登入視窗。\n\n系統已為您切換至「測試帳號」以便預覽操作畫面。當您將程式碼更新至 GitHub 後，登入功能就會完全正常運作！");
+             alert("💡 提示：您目前處於「預覽模式」。\n系統已為您切換至「測試帳號」以便預覽操作畫面。當您將程式碼更新至 GitHub 後，即可正常登入！");
              setUser({ email: 'preview@cloud.tcssh.tc.edu.tw', displayName: '預覽人員' });
           } else {
              console.error("登入失敗", err);
-             alert("登入發生錯誤：" + err.message + "\n\n(若持續發生，請嘗試改用 Safari 或 Chrome 瀏覽器開啟)");
+             alert("登入發生錯誤：" + err.message);
           }
         });
       };
@@ -201,7 +182,7 @@
       const handleLogout = () => {
         if(window.confirm("確定要登出系統嗎？")) {
           auth.signOut();
-          setUser(null); // 確保預覽用的測試帳號也被清除
+          setUser(null);
         }
       };
 
@@ -209,8 +190,7 @@
         if (!user) return;
         const recordsRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('patrolRecords');
         
-        // ★ Phase 3: Snapshot 會自動處理離線與線上資料的同步
-        const unsubscribeDB = recordsRef.onSnapshot({ includeMetadataChanges: true }, (snapshot) => {
+        const unsubscribeDB = recordsRef.onSnapshot((snapshot) => {
           const data = [];
           snapshot.forEach(doc => {
             const docData = doc.data();
@@ -219,34 +199,29 @@
             } else if (!docData.violationCodes) {
                docData.violationCodes = ['✓'];
             }
-            // 標記這筆資料是否還在本地快取等待上傳
-            data.push({ id: doc.id, _isPending: doc.metadata.hasPendingWrites, ...docData });
+            data.push({ id: doc.id, ...docData });
           });
           setRecords(data);
-          setIsSyncing(snapshot.metadata.fromCache);
+          setIsSyncing(false);
         }, (error) => {
           console.error("Snapshot error:", error);
           setIsSyncing(false);
         });
-
         return () => unsubscribeDB();
       }, [user]);
 
       const addRecordsToDB = async (newRecords) => {
         if (!user) return;
         const recordsRef = db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('patrolRecords');
-        
         const chunkSize = 450;
         for (let i = 0; i < newRecords.length; i += chunkSize) {
           const chunk = newRecords.slice(i, i + chunkSize);
           const batch = db.batch();
           chunk.forEach(r => {
             const docRef = recordsRef.doc(r.id);
-            // ★ Phase 3: Firestore 的 set 會在離線時自動存入本機端，等網路恢復時背景送出
             batch.set(docRef, r);
           });
-          // 這裡不再等待網路回應才算成功，而是直接完成，提升離線體驗
-          batch.commit().catch(e => console.warn("離線暫存成功，等待網路恢復後上傳", e));
+          await batch.commit();
         }
       };
 
@@ -273,13 +248,12 @@
               <div className="text-6xl mb-4 emoji-icon">🏫</div>
               <h1 className="text-2xl font-bold text-gray-800 mb-4">臺中二中 巡堂系統</h1>
               
-              {/* 防呆機制：若為 LINE 內建瀏覽器，顯示警告並鎖住按鈕 */}
               {isInAppBrowser ? (
                 <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl mb-6 text-sm text-left">
                   <div className="font-bold text-base mb-1 flex items-center"><span className="emoji-icon mr-1">⚠️</span> 請注意：瀏覽器不相容</div>
                   您目前正使用 LINE 或其他通訊軟體的內建瀏覽器開啟。<br/><br/>
-                  Google 基於安全政策 (<span className="font-mono text-xs">403 disallowed_useragent</span>)，<b>禁止在通訊軟體內直接登入</b>。<br/><br/>
-                  👉 請點選畫面右上角(或右下角)的選單，選擇<b>「以預設瀏覽器開啟」</b>(如 Chrome 或 Safari) 即可順利登入！
+                  Google 基於安全政策，<b>禁止在通訊軟體內直接登入</b>。<br/><br/>
+                  👉 請點選畫面選單，選擇<b>「以預設瀏覽器開啟」</b>(如 Chrome 或 Safari) 即可順利登入！
                 </div>
               ) : (
                 <p className="text-gray-600 mb-8 text-sm leading-relaxed">
@@ -301,29 +275,31 @@
         );
       }
 
+      const isAdmin = ADMIN_EMAILS.includes(user.email);
+
       return (
         <div className="min-h-screen">
           <nav className="bg-blue-800 text-white shadow-md sticky top-0 z-40">
-            {/* ★ Phase 3: 網路狀態提示條 */}
-            {!isOnline && (
-               <div className="bg-orange-500 text-white text-xs font-bold text-center py-1 flex items-center justify-center">
-                 <span className="emoji-icon mr-1">✈️</span> 網路已斷線，系統進入離線暫存模式 (恢復連線時將自動上傳)
-               </div>
-            )}
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="flex justify-between h-16">
                 <div className="flex items-center space-x-3">
                   <span className="text-2xl emoji-icon">📋</span>
                   <span className="font-bold text-lg tracking-wider hidden sm:inline">臺中二中 巡堂系統</span>
-                  <span className="font-bold text-lg tracking-wider sm:hidden">二中 巡堂系統</span>
+                  <span className="font-bold text-lg tracking-wider sm:hidden">二中巡堂</span>
                   
                   <div className="hidden lg:flex items-center space-x-2 ml-4">
                     <span className="flex items-center text-xs text-blue-200 bg-blue-900 px-2 py-1 rounded-full border border-blue-700" title={user.email}>
                       <span className="mr-1 emoji-icon">👤</span> {user.email.split('@')[0]}
                     </span>
-                    <span className="flex items-center text-xs text-blue-200 bg-blue-900 px-2 py-1 rounded-full border border-blue-700">
-                      <span className="mr-1 emoji-icon">☁️</span> {isSyncing ? '同步中...' : (isOnline ? '已連線' : '離線暫存')}
-                    </span>
+                    {!isOnline ? (
+                      <span className="flex items-center text-xs text-orange-200 bg-orange-900 px-2 py-1 rounded-full border border-orange-700">
+                        <span className="mr-1 emoji-icon">✈️</span> 離線模式
+                      </span>
+                    ) : (
+                      <span className="flex items-center text-xs text-blue-200 bg-blue-900 px-2 py-1 rounded-full border border-blue-700">
+                        <span className="mr-1 emoji-icon">☁️</span> {isSyncing ? '同步中...' : '連線正常'}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center space-x-1 sm:space-x-3">
@@ -333,7 +309,6 @@
                   <button onClick={() => setCurrentView('frontend')} className={`px-3 py-2 rounded-md text-sm font-medium flex items-center transition-colors ${currentView === 'frontend' ? 'bg-blue-900 text-white shadow-inner' : 'text-blue-100 hover:bg-blue-700'}`}>
                     <span className="mr-1 sm:mr-2 emoji-icon">✏️</span><span className="hidden sm:inline">填表端</span><span className="sm:hidden">填表</span>
                   </button>
-                  {/* ★ Phase 2: 只有管理員才顯示後台按鈕 */}
                   {isAdmin && (
                     <button onClick={() => setCurrentView('backend')} className={`px-3 py-2 rounded-md text-sm font-medium flex items-center transition-colors ${currentView === 'backend' ? 'bg-blue-900 text-white shadow-inner' : 'text-blue-100 hover:bg-blue-700'}`}>
                       <span className="mr-1 sm:mr-2 emoji-icon">⚙️</span><span className="hidden sm:inline">後台端</span><span className="sm:hidden">後台</span>
@@ -350,22 +325,28 @@
             </div>
           )}
 
+          {/* 若處於離線狀態，顯示全域警告 */}
+          {!isOnline && (
+            <div className="bg-orange-100 border-l-4 border-orange-500 text-orange-700 p-4 m-4 rounded shadow-sm text-sm font-medium flex items-center">
+              <span className="text-xl mr-2 emoji-icon">📶</span> 
+              目前網路斷線，您仍可繼續填寫巡堂紀錄。資料將會自動暫存在手機中，待網路恢復後可再次送出。
+            </div>
+          )}
+
           <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
             {currentView === 'frontend' ? (
-              <FrontendView addRecords={addRecordsToDB} showToast={showToast} isSyncing={isSyncing} user={user} isOnline={isOnline} />
+              <FrontendView addRecords={addRecordsToDB} showToast={showToast} isSyncing={isSyncing} isOnline={isOnline} user={user} />
             ) : (
-              isAdmin ? <BackendView records={records} addRecords={addRecordsToDB} deleteRecord={deleteRecordFromDB} updateRecord={updateRecordToDB} showToast={showToast} /> 
-                      : <div className="text-center p-10 text-red-500 font-bold bg-white rounded-xl shadow">⛔ 您沒有後台管理權限，請返回填表端。</div>
+              <BackendView records={records} addRecords={addRecordsToDB} deleteRecord={deleteRecordFromDB} updateRecord={updateRecordToDB} showToast={showToast} />
             )}
           </main>
         </div>
       );
     }
 
-    function FrontendView({ addRecords, showToast, isSyncing, user, isOnline }) {
+    function FrontendView({ addRecords, showToast, isSyncing, isOnline, user }) {
       const todayStr = new Date().toISOString().split('T')[0];
       
-      // 時間與節次自動判別邏輯
       const guessCurrentPeriod = () => {
           const now = new Date();
           const time = now.getHours() * 100 + now.getMinutes();
@@ -381,7 +362,6 @@
           return '第1節';
       };
 
-      // 基本資料自動記憶
       const [basicInfo, setBasicInfo] = useState(() => {
         const savedProfile = localStorage.getItem('tcssh_profile');
         let defaultOffice = '';
@@ -416,21 +396,19 @@
 
       const getEmptyRow = () => ({ id: crypto.randomUUID(), classId: '', teacher: '', violationCodes: ['✓'], remark: '', photo: null });
       
-      // ★ Phase 1: 表單草稿防呆機制 (Auto-Save)
+      // ★ 草稿防掉單機制
       const [draftRows, setDraftRows] = useState(() => {
         const savedDrafts = localStorage.getItem('tcssh_draft_rows');
         if (savedDrafts) {
           try {
             const parsed = JSON.parse(savedDrafts);
             if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-          } catch(e) { console.error("解析草稿失敗", e); }
+          } catch(e) {}
         }
         return [getEmptyRow()];
       });
 
-      // 當草稿變更時，自動存入 localStorage
       useEffect(() => {
-        // 只有當草稿真的有內容時才存檔，避免存入空白覆蓋掉有用的資料
         const hasContent = draftRows.some(row => row.classId !== '' || row.remark !== '' || row.violationCodes[0] !== '✓');
         if (hasContent) {
            localStorage.setItem('tcssh_draft_rows', JSON.stringify(draftRows));
@@ -441,7 +419,8 @@
 
       const [isSubmitting, setIsSubmitting] = useState(false);
       
-      const [quickGrade, setQuickGrade] = useState(1);
+      // 改為使用「動線」紀錄當前選擇的建築物
+      const [quickBuilding, setQuickBuilding] = useState(CAMPUS_BUILDINGS[0]);
       const [showSopModal, setShowSopModal] = useState(false); 
 
       const compressImage = (file, maxWidth = 800, maxHeight = 800, quality = 0.6) => {
@@ -477,17 +456,14 @@
 
       const updateBasicInfo = (field, value) => setBasicInfo(prev => ({ ...prev, [field]: value }));
       
-      // 使用 useCallback 確保函數參考不會在每次渲染改變，提升效能
       const updateDraftRow = useCallback((id, field, value) => {
         setDraftRows(prev => prev.map(row => row.id === id ? { ...row, [field]: value } : row));
       }, []);
 
-      // ★ Phase 1: 快捷標籤的處理邏輯
       const handleQuickTagClick = useCallback((id, tag) => {
         setDraftRows(prev => prev.map(row => {
           if (row.id !== id) return row;
           const currentRemark = row.remark || '';
-          // 若備註已經包含該標籤則不重複加入，否則串接
           if (currentRemark.includes(tag)) return row;
           const newRemark = currentRemark ? `${currentRemark}, ${tag}` : tag;
           return { ...row, remark: newRemark };
@@ -539,8 +515,10 @@
         if (basicInfo.period === '其他' && !basicInfo.customPeriod) {
           alert("請輸入自訂節次時間"); return;
         }
-        // ★ Phase 3: 拔除連線檢查阻擋，讓資料隨時可以暫存
-        // if (isSyncing) { alert("系統正在連接雲端，請稍候再送出"); return; }
+        if (!isOnline) {
+          alert("目前無網路連線。資料已保存在草稿中，請移動至有網路的地方後再試。"); 
+          return;
+        }
 
         setIsSubmitting(true);
         const validRows = [];
@@ -549,7 +527,7 @@
         rowsToSubmit.forEach(row => {
           if (!row.classId.trim()) return;
           if (row.violationCodes.some(c => ['B', 'G', 'H'].includes(c)) && !row.remark.trim()) {
-            alert(`地點/班級 ${row.classId} 選擇了須填寫備註的代號，請務必填寫備註說明！`);
+            alert(`地點/班級 [${row.classId}] 選擇了須填寫備註的代號，請務必填寫說明！`);
             invalidRows.push(row);
           } else {
             const fallbackCode = row.violationCodes.includes('✓') ? '✓' : row.violationCodes.join(',');
@@ -564,26 +542,16 @@
 
         try {
           await addRecords(validRows);
-          // ★ Phase 3: 根據連線狀態給予不同回饋
-          if (isOnline) {
-             showToast(`已成功送出 ${validRows.length} 筆紀錄至雲端！`);
-          } else {
-             showToast(`網路斷線中，已為您本機暫存 ${validRows.length} 筆紀錄！`);
-          }
+          showToast(`已成功送出 ${validRows.length} 筆紀錄至雲端！`);
           
-          // 清除送出成功的草稿，保留未完成的
           const remainingDrafts = draftRows.filter(draft => !validRows.some(valid => valid.id === draft.id));
           const newDrafts = remainingDrafts.length > 0 ? remainingDrafts : [getEmptyRow()];
           setDraftRows(newDrafts);
-          
-          // 若全部清空，同時清除 localStorage
-          if(remainingDrafts.length === 0) {
-             localStorage.removeItem('tcssh_draft_rows');
-          }
+          if(remainingDrafts.length === 0) localStorage.removeItem('tcssh_draft_rows');
           
           window.scrollTo({ top: 0, behavior: 'smooth' });
         } catch (err) {
-          alert("送出失敗！"); console.error(err);
+          alert("送出失敗，請再次確認網路狀態！"); console.error(err);
         } finally {
           setIsSubmitting(false);
         }
@@ -631,10 +599,7 @@
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
                     <div className="md:col-span-2">
                       <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">地點/班級</label>
-                      <input type="text" placeholder="班級(例:101、音樂館)" className="w-full border-gray-300 rounded-md p-2 border focus:ring-blue-500 focus:border-blue-500" value={row.classId} onChange={e => updateDraftRow(row.id, 'classId', e.target.value)} list="room-list" />
-                      <datalist id="room-list">
-                        {SPECIAL_ROOMS.map(room => <option key={room} value={room} />)}
-                      </datalist>
+                      <input type="text" placeholder="班級(例:101、音樂館)" className="w-full border-gray-300 rounded-md p-2 border focus:ring-blue-500 focus:border-blue-500" value={row.classId} onChange={e => updateDraftRow(row.id, 'classId', e.target.value)} />
                     </div>
                     <div className="md:col-span-2">
                       <label className="block text-xs font-medium text-gray-500 mb-1 md:hidden">老師(選填)</label>
@@ -661,7 +626,6 @@
                     <div className="md:col-span-4 space-y-2">
                       <label className="block text-xs font-medium text-gray-500 md:hidden">備註與快捷標籤</label>
                       
-                      {/* ★ Phase 1: 常見情境快捷標籤 */}
                       <div className="flex flex-wrap gap-1.5 mb-2">
                         {QUICK_TAGS.map(tag => (
                            <button 
@@ -690,17 +654,16 @@
                         </div>
                       </div>
                     </div>
-
                   </div>
                 </div>
               )})}
             </div>
 
-            {/* 新版底部常駐：快速新增班級面板 */}
+            {/* 建築物/動線 快速新增面板 */}
             <div className="mt-6 bg-indigo-50 p-4 rounded-xl border border-indigo-100 shadow-inner">
                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-3 border-b border-indigo-100 pb-3 gap-3">
                  <div className="font-bold text-indigo-800 flex items-center text-base sm:text-lg">
-                    <span className="text-xl mr-1 emoji-icon">⚡</span> 快速新增下一個班級
+                    <span className="text-xl mr-1 emoji-icon">📍</span> 依巡查動線快速新增
                  </div>
                  <button onClick={addRow} className="text-xs sm:text-sm bg-white text-indigo-600 border border-indigo-200 px-3 py-2 rounded-md hover:bg-indigo-100 font-medium transition-colors shadow-sm self-start sm:self-auto">
                    ➕ 手動新增空白列
@@ -708,38 +671,22 @@
                </div>
                
                <div className="flex space-x-2 mb-3 overflow-x-auto pb-1">
-                 {[1, 2, 3].map(g => (
-                   <button key={g} onClick={() => setQuickGrade(g)} className={`flex-1 min-w-[60px] py-2 rounded-md font-bold text-sm sm:text-base transition-colors ${quickGrade === g ? 'bg-indigo-500 text-white shadow-md' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-100'}`}>
-                     高{['一','二','三'][g-1]}
+                 {CAMPUS_BUILDINGS.map(bldg => (
+                   <button key={bldg} onClick={() => setQuickBuilding(bldg)} className={`flex-1 min-w-[80px] py-2 rounded-md font-bold text-sm transition-colors ${quickBuilding === bldg ? 'bg-indigo-500 text-white shadow-md' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-100'}`}>
+                     {bldg}
                    </button>
                  ))}
-                 <button onClick={() => setQuickGrade('special')} className={`flex-1 min-w-[80px] py-2 rounded-md font-bold text-sm sm:text-base transition-colors ${quickGrade === 'special' ? 'bg-indigo-500 text-white shadow-md' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-100'}`}>
-                   特殊教室
-                 </button>
                </div>
                
                <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-8 gap-1.5 sm:gap-2">
-                 {quickGrade === 'special' ? (
-                   SPECIAL_ROOMS.map(room => {
-                     const isAdded = draftRows.some(r => r.classId === room);
-                     return (
-                       <button key={room} onClick={() => handleQuickAddClass(room)} disabled={isAdded} className={`py-2.5 rounded border text-sm sm:text-base font-bold transition-colors ${isAdded ? 'bg-indigo-100 text-indigo-300 border-indigo-100 cursor-not-allowed' : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-500 hover:text-white hover:border-indigo-500 shadow-sm'}`}>
-                         {room}
-                       </button>
-                     );
-                   })
-                 ) : (
-                   Array.from({length: 25}, (_, i) => {
-                     const classNum = String(i + 1).padStart(2, '0');
-                     const classId = `${quickGrade}${classNum}`;
-                     const isAdded = draftRows.some(r => r.classId === classId);
-                     return (
-                       <button key={classId} onClick={() => handleQuickAddClass(classId)} disabled={isAdded} className={`py-2.5 rounded border text-sm sm:text-base font-bold transition-colors ${isAdded ? 'bg-indigo-100 text-indigo-300 border-indigo-100 cursor-not-allowed' : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-500 hover:text-white hover:border-indigo-500 shadow-sm'}`}>
-                         {classId}
-                       </button>
-                     );
-                   })
-                 )}
+                 {CAMPUS_ROOMS[quickBuilding].map(room => {
+                   const isAdded = draftRows.some(r => r.classId === room);
+                   return (
+                     <button key={room} onClick={() => handleQuickAddClass(room)} disabled={isAdded} className={`py-2.5 rounded border text-sm sm:text-base font-bold transition-colors ${isAdded ? 'bg-indigo-100 text-indigo-300 border-indigo-100 cursor-not-allowed' : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-500 hover:text-white hover:border-indigo-500 shadow-sm'}`}>
+                       {room}
+                     </button>
+                   );
+                 })}
                </div>
             </div>
 
@@ -750,7 +697,6 @@
             </div>
           </div>
 
-          {/* 巡堂 SOP Modal */}
           {showSopModal && (
             <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg flex flex-col max-h-[85vh]">
@@ -759,42 +705,35 @@
                   <button onClick={() => setShowSopModal(false)} className="text-gray-500 hover:text-gray-800 emoji-icon text-xl">❌</button>
                 </div>
                 <div className="p-5 overflow-y-auto space-y-5 text-sm text-gray-700 leading-relaxed">
-                  
                   <div className="border-l-4 border-red-500 pl-3">
                     <h4 className="font-bold text-red-700 text-base mb-1">[C] 違規使用手機</h4>
                     <ul className="list-disc list-inside ml-2 space-y-1">
                       <li>巡堂人員得進入教室制止。</li>
                       <li>於系統登記違規資料 (代號C)。</li>
-                      <li>將手機代管並移交**學務處**，後續由學務處依校規處理。</li>
+                      <li>將手機代管並移交學務處，後續依校規處理。</li>
                     </ul>
                   </div>
-
                   <div className="border-l-4 border-purple-500 pl-3">
                     <h4 className="font-bold text-purple-700 text-base mb-1">[H] 跑班課程學生滯留/遊蕩</h4>
                     <ol className="list-decimal list-inside ml-2 space-y-1">
-                      <li>**引導歸建**：先了解滯留原因，引導其至指定教室上課。</li>
-                      <li>**即時聯繫**：運用分機表致電任課老師 (體育課通知體育組) 告知動向以完成交接。</li>
-                      <li>**拒絕上課處置**：若勸導無效，引導至學務處，或致電請教官處置。</li>
+                      <li>引導歸建：先了解滯留原因，引導其至指定教室。</li>
+                      <li>即時聯繫：致電任課老師告知動向完成交接。</li>
+                      <li>勸導無效引導至學務處交由教官處置。</li>
                     </ol>
                   </div>
-
                   <div className="border-l-4 border-blue-500 pl-3">
                     <h4 className="font-bold text-blue-700 text-base mb-1">未參與校外課(含遲到)之安置</h4>
                     <ul className="list-disc list-inside ml-2 space-y-1">
-                      <li>引導至指定地點自習：(1)圖書館 (2)學務處 (3)教務處。</li>
+                      <li>引導至指定地點自習(圖書館/學務處/教務處)。</li>
                       <li>督促完成任課老師預留之學習單。</li>
-                      <li>教學組將以 email 統一通知任課教師。</li>
                     </ul>
                   </div>
-
                   <div className="border-l-4 border-green-500 pl-3">
                     <h4 className="font-bold text-green-700 text-base mb-1">[D/E/F] 硬體與環境缺失</h4>
                     <ul className="list-disc list-inside ml-2 space-y-1">
-                      <li>教室未關燈/窗或設備損壞，於系統紀錄。</li>
-                      <li>後續由系統(教學組)通知導師及**總務處**協處。</li>
+                      <li>系統紀錄，後續由教學組通知總務處修繕。</li>
                     </ul>
                   </div>
-
                 </div>
                 <div className="p-4 border-t flex justify-end">
                   <button onClick={() => setShowSopModal(false)} className="px-5 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 font-bold">了解</button>
@@ -832,9 +771,6 @@
       const [emailData, setEmailData] = useState(null); 
       const fileInputRef = useRef(null); 
 
-      // ==========================================
-      // ★ 教學組公用帳號發信設定區 ★
-      // ==========================================
       const EMAIL_API_URL = ""; 
       
       const filteredRecords = useMemo(() => {
@@ -845,24 +781,14 @@
           .sort((a, b) => b.timestamp - a.timestamp);
       }, [records, filterDate, filterOffice, filterHOnly]);
 
-      // 初始化 Email Modal 狀態
       const openEmailModal = (r) => {
         setEmailData({
-            isOpen: true,
-            record: r,
-            to: '',
-            template: 'teacher',
-            studentName: '',
-            reportTime: '',
-            subject: '',
-            body: ''
+            isOpen: true, record: r, to: '', template: 'teacher', studentName: '', reportTime: '', subject: '', body: ''
         });
       };
 
-      // 監聽並自動產生 Email 範本內容
       useEffect(() => {
         if (!emailData || !emailData.isOpen) return;
-        
         const r = emailData.record;
         const codes = r.violationCodes || ['✓'];
         const descText = codes.map(c => {
@@ -875,66 +801,33 @@
 
         if (emailData.template === 'teacher') {
             genSubj = `[巡堂紀錄通知] ${r.date} 第${r.period} - 地點/班級：${r.classId}`;
-            genBody = `任課教師 / 導師 您好：\n\n教務處於巡堂時發現以下狀況，敬請協助留意與輔導：\n\n`+
-                      `一、時間：${r.date} 第${r.period}\n`+
-                      `二、地點/班級：${r.classId}\n`+
-                      `三、紀錄事項：\n${descText}\n\n`+
-                      `【備註說明】\n${r.remark || '無'}\n\n`+
-                      `巡堂人員：${r.name} (${r.office})\n`+
-                      `教務處教學組 敬啟`;
+            genBody = `任課教師 / 導師 您好：\n\n教務處於巡堂時發現以下狀況，敬請協助留意與輔導：\n\n一、時間：${r.date} 第${r.period}\n二、地點/班級：${r.classId}\n三、紀錄事項：\n${descText}\n\n【備註說明】\n${r.remark || '無'}\n\n巡堂人員：${r.name} (${r.office})\n教務處教學組 敬啟`;
         } else if (emailData.template === 'student') {
             genSubj = `[約談通知] ${r.classId} 巡堂違規約談單 - ${emailData.studentName || '(請輸入姓名)'}`;
-            genBody = `一、時間：${r.date} 第${r.period}\n`+
-                      `二、地點/班級：${r.classId}\n`+
-                      `三、學生姓名/座號：${emailData.studentName || '(請輸入姓名)'}\n`+
-                      `四、所見情形：\n${descText}\n\n`+
-                      `※ 注意事項：\n請該名學生於 ${emailData.reportTime || '(請輸入約談時間)'} 至 教務處教學組 說明。\n\n`+
-                      `教務處教學組 敬啟`;
+            genBody = `一、時間：${r.date} 第${r.period}\n二、地點/班級：${r.classId}\n三、學生姓名/座號：${emailData.studentName || '(請輸入姓名)'}\n四、所見情形：\n${descText}\n\n※ 注意事項：\n請該名學生於 ${emailData.reportTime || '(請輸入約談時間)'} 至 教務處教學組 說明。\n\n教務處教學組 敬啟`;
         } else if (emailData.template === 'student_affairs') {
             genSubj = `[學務通報] ${r.date} 第${r.period} - 地點/班級：${r.classId} 異常處置通報`;
-            genBody = `學務處 / 主任教官 您好：\n\n教務處巡堂時發現以下異常狀況，已依SOP進行初步處置，後續敬請學務處協助辦理：\n\n`+
-                      `一、地點/班級：${r.classId}\n`+
-                      `二、狀況紀錄：\n${descText}\n\n`+
-                      `【初步處置與備註】\n${r.remark || '無'}\n\n`+
-                      `巡堂人員：${r.name} (${r.office})`;
+            genBody = `學務處 / 主任教官 您好：\n\n教務處巡堂時發現以下異常狀況，已依SOP進行初步處置，後續敬請學務處協助辦理：\n\n一、地點/班級：${r.classId}\n二、狀況紀錄：\n${descText}\n\n【初步處置與備註】\n${r.remark || '無'}\n\n巡堂人員：${r.name} (${r.office})`;
         } else if (emailData.template === 'general_affairs') {
             genSubj = `[總務通報] ${r.classId} 設施與環境異常通報`;
-            genBody = `總務處 您好：\n\n教務處巡堂時發現以下環境或設施異常，敬請協助處理：\n\n`+
-                      `一、地點/班級：${r.classId} (${r.date} 第${r.period})\n`+
-                      `二、異常狀況：\n${descText}\n\n`+
-                      `【詳細說明】\n${r.remark || '無'}\n\n`+
-                      `巡堂人員：${r.name} (${r.office})`;
+            genBody = `總務處 您好：\n\n教務處巡堂時發現以下環境或設施異常，敬請協助處理：\n\n一、地點/班級：${r.classId} (${r.date} 第${r.period})\n二、異常狀況：\n${descText}\n\n【詳細說明】\n${r.remark || '無'}\n\n巡堂人員：${r.name} (${r.office})`;
         }
-
         setEmailData(prev => ({ ...prev, subject: genSubj, body: genBody }));
       }, [emailData?.template, emailData?.studentName, emailData?.reportTime, emailData?.record]);
 
       const executeSendEmail = async () => {
         if (!emailData.to) return alert("請輸入收件人信箱");
-
         if (EMAIL_API_URL && EMAIL_API_URL.startsWith("http")) {
             try {
                 showToast("📧 信件背景發送中...");
-                const toEmail = emailData.to;
-                const subjectStr = emailData.subject;
-                const bodyStr = emailData.body;
-                setEmailData(null); 
-
                 const formData = new URLSearchParams();
-                formData.append('to', toEmail);
-                formData.append('subject', subjectStr);
-                formData.append('body', bodyStr);
-
-                await fetch(EMAIL_API_URL, {
-                    method: 'POST',
-                    mode: 'no-cors', 
-                    body: formData
-                });
-                
-                showToast("✅ 已成功由公用帳號發出通知信！");
-            } catch(e) {
-                alert("發送失敗，請檢查網路連線");
-            }
+                formData.append('to', emailData.to);
+                formData.append('subject', emailData.subject);
+                formData.append('body', emailData.body);
+                setEmailData(null); 
+                await fetch(EMAIL_API_URL, { method: 'POST', mode: 'no-cors', body: formData });
+                showToast("✅ 已成功發出通知信！");
+            } catch(e) { alert("發送失敗，請檢查網路連線"); }
         } else {
             window.location.href = `mailto:${emailData.to}?subject=${encodeURIComponent(emailData.subject)}&body=${encodeURIComponent(emailData.body)}`;
             setEmailData(null); 
@@ -944,77 +837,45 @@
       const handleImportExcel = (e) => {
         const file = e.target.files[0];
         if (!file) return;
-
         const reader = new FileReader();
         reader.onload = async (evt) => {
           try {
             const data = new Uint8Array(evt.target.result);
             const workbook = XLSX.read(data, { type: 'array' });
-            const firstSheetName = workbook.SheetNames[0];
-            const worksheet = workbook.Sheets[firstSheetName];
-            const jsonData = XLSX.utils.sheet_to_json(worksheet);
-
+            const jsonData = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
             if (jsonData.length === 0) { alert("檔案中沒有資料！"); return; }
-
             const importedRecords = [];
             jsonData.forEach(rawRow => {
               const row = {};
               Object.keys(rawRow).forEach(k => { row[k.trim()] = rawRow[k]; });
-
               const classId = String(row['地點/班級'] || row['班級'] || row['班級編號'] || '').trim();
               if (!classId) return;
 
               let dateStr = row['日期'];
               if (typeof dateStr === 'number') {
-                const excelEpoch = new Date(1899, 11, 30);
-                dateStr = new Date(excelEpoch.getTime() + dateStr * 86400000).toISOString().split('T')[0];
+                dateStr = new Date(new Date(1899, 11, 30).getTime() + dateStr * 86400000).toISOString().split('T')[0];
               } else if (typeof dateStr === 'string') {
                 dateStr = dateStr.replace(/\//g, '-');
                 const parts = dateStr.split('-');
-                if(parts.length === 3) {
-                   const y = parts[0].length === 2 ? '20'+parts[0] : parts[0];
-                   const m = parts[1].padStart(2, '0');
-                   const d = parts[2].padStart(2, '0');
-                   dateStr = `${y}-${m}-${d}`;
-                }
-              } else {
-                dateStr = new Date().toISOString().split('T')[0];
-              }
+                if(parts.length === 3) dateStr = `${parts[0].length === 2 ? '20'+parts[0] : parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+              } else dateStr = new Date().toISOString().split('T')[0];
 
-              const rawCodesStr = String(row['代號'] || row['違規代號'] || '✓').trim();
-              const parsedCodes = rawCodesStr.split(/[,、]/).map(c => c.trim()).filter(c => c);
-
+              const parsedCodes = String(row['代號'] || row['違規代號'] || '✓').trim().split(/[,、]/).map(c => c.trim()).filter(c => c);
               importedRecords.push({
-                id: crypto.randomUUID(),
-                date: dateStr,
-                period: String(row['節次'] || '其他').trim(),
-                office: String(row['處室'] || '').trim(),
-                title: String(row['職稱'] || '').trim(),
-                name: String(row['姓名'] || '匯入資料').trim(),
-                classId: classId,
-                teacher: String(row['任課老師'] || '').trim(),
+                id: crypto.randomUUID(), date: dateStr, period: String(row['節次'] || '其他').trim(),
+                office: String(row['處室'] || '').trim(), title: String(row['職稱'] || '').trim(), name: String(row['姓名'] || '匯入資料').trim(),
+                classId, teacher: String(row['任課老師'] || '').trim(),
                 violationCodes: parsedCodes.length > 0 ? parsedCodes : ['✓'],
                 violationCode: parsedCodes.includes('✓') ? '✓' : parsedCodes.join(','),
-                remark: String(row['備註'] || row['狀況描述'] || '').trim(),
-                photo: null,
-                timestamp: Date.now()
+                remark: String(row['備註'] || row['狀況描述'] || '').trim(), photo: null, timestamp: Date.now()
               });
             });
-
-            if (importedRecords.length > 0) {
-              if (window.confirm(`成功讀取 ${importedRecords.length} 筆紀錄，確定要整批匯入雲端嗎？\n(匯入後將自動清除篩選以顯示資料)`)) {
-                await addRecords(importedRecords);
-                setFilterDate('');
-                setFilterOffice('');
-                showToast(`成功匯入 ${importedRecords.length} 筆資料！`);
-              }
-            } else {
-              alert("找不到可匯入的資料，請確認 Excel 標題列是否包含「地點/班級」");
+            if (importedRecords.length > 0 && window.confirm(`成功讀取 ${importedRecords.length} 筆紀錄，確定匯入嗎？`)) {
+              await addRecords(importedRecords);
+              setFilterDate(''); setFilterOffice('');
+              showToast(`成功匯入 ${importedRecords.length} 筆資料！`);
             }
-          } catch (error) {
-            console.error(error);
-            alert("匯入失敗，請確認檔案格式是否正確。");
-          }
+          } catch (error) { alert("匯入失敗，格式錯誤。"); }
           if(fileInputRef.current) fileInputRef.current.value = '';
         };
         reader.readAsArrayBuffer(file);
@@ -1023,30 +884,18 @@
       const handleExportWord = () => {
         if (filteredRecords.length === 0) { alert("無紀錄可匯出"); return; }
         const targetDate = new Date(filterDate || filteredRecords[0].date);
-        const year = targetDate.getFullYear() - 1911;
-        const month = targetDate.getMonth() + 1;
-        const day = targetDate.getDate();
-        const weekDayStr = ['日', '一', '二', '三', '四', '五', '六'][targetDate.getDay()];
-        
+        const [year, month, day, weekDayStr] = [targetDate.getFullYear() - 1911, targetDate.getMonth() + 1, targetDate.getDate(), ['日', '一', '二', '三', '四', '五', '六'][targetDate.getDay()]];
         let tableRows = '', photoDivs = '';
         const patrolNames = [...new Set(filteredRecords.map(r => r.name))].join('、');
 
         filteredRecords.forEach(r => {
-          const codes = r.violationCodes || ['✓'];
-          const isNormal = codes.includes('✓');
-          const vText = isNormal ? '正常' : codes.join(', ');
-          
+          const isNormal = (r.violationCodes || ['✓']).includes('✓');
+          const vText = isNormal ? '正常' : (r.violationCodes || []).join(', ');
           tableRows += `<tr><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.classId}</td><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.period}</td><td style="border: 1px solid black; padding: 8px; text-align: center;">${r.teacher || ''}</td><td style="border: 1px solid black; padding: 8px; text-align: center; font-weight: ${isNormal?'normal':'bold'}; color: ${isNormal?'black':'red'};">${vText}</td><td style="border: 1px solid black; padding: 8px; text-align: left;">${r.remark || ''}</td></tr>`;
-          
-          if (r.photo) {
-             // ★ Phase 3: 後台列印照片時若資料還在等待上傳，給予提示
-             const pendingMark = r._isPending ? ' <span style="color:orange;font-size:12px;">(尚未連線上傳)</span>' : '';
-             photoDivs += `<div style="margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;"><h4 style="margin-top: 0;">📌 ${r.period} - 地點/班級：${r.classId}${pendingMark}</h4><p>狀況：${vText}</p><p>備註：${r.remark || '無'}</p><img src="${r.photo}" style="max-width: 500px; border: 1px solid #eee;" /></div>`;
-          }
+          if (r.photo) photoDivs += `<div style="margin-bottom: 20px; border: 1px solid #ccc; padding: 10px;"><h4 style="margin-top: 0;">📌 ${r.period} - 地點/班級：${r.classId}</h4><p>狀況：${vText}</p><p>備註：${r.remark || '無'}</p><img src="${r.photo}" style="max-width: 500px; border: 1px solid #eee;" /></div>`;
         });
 
         const htmlContent = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset="UTF-8"><style>body { font-family: "標楷體", "DFKai-sb", serif; color: #000; line-height: 1.5; } table { width: 100%; border-collapse: collapse; margin-bottom: 20px; } h1 { text-align: center; font-size: 24px; letter-spacing: 2px; } .legend { font-size: 14px; border: 1px solid #000; padding: 10px; margin-bottom: 20px; }</style></head><body><h1>臺中市立臺中第二高級中學巡堂紀錄表</h1><div style="display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 16px;"><span>日期： <u> &nbsp;${year}&nbsp; </u> 年 <u> &nbsp;${month}&nbsp; </u> 月 <u> &nbsp;${day}&nbsp; </u> 日 星期 <u> &nbsp;${weekDayStr}&nbsp; </u></span><span style="float: right;">巡堂人員： <u> &nbsp;${patrolNames || '_______________'}&nbsp; </u></span></div><table style="border: 1px solid black;"><thead><tr><th style="border: 1px solid black; padding: 8px; width: 12%; background-color: #f2f2f2;">地點/班別</th><th style="border: 1px solid black; padding: 8px; width: 12%; background-color: #f2f2f2;">節次</th><th style="border: 1px solid black; padding: 8px; width: 15%; background-color: #f2f2f2;">任課老師</th><th style="border: 1px solid black; padding: 8px; width: 15%; background-color: #f2f2f2;">紀錄</th><th style="border: 1px solid black; padding: 8px; width: 46%; background-color: #f2f2f2;">違規及待改進事項</th></tr></thead><tbody>${tableRows || '<tr><td colspan="5" style="border: 1px solid black; text-align: center; padding: 10px;">無紀錄</td></tr>'}</tbody></table><div class="legend"><strong>紀錄代號：</strong><br>A. 嬉鬧吵雜,課堂管理欠佳<br>B. 睡覺人數較多(請註記:大概人數*n)<br>C. 不當使用手機或3C產品(請學生到走廊登記學號)<br>D. 教室或走廊髒亂<br>E. 室外課教室 門窗未關閉 &nbsp;&nbsp;&nbsp;&nbsp; F. 室外課教室 電源未關閉<br>G. 老師無故未到 &nbsp;&nbsp;&nbsp;&nbsp; H. 學生異常滯留/未到課</div><table style="width: 100%; margin-top: 40px; border: none;"><tr><td style="border: none; text-align: left; vertical-align: bottom; height: 80px;">巡堂：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">會簽：<br><br><br>學務處：___________  <br>其他：_____________</td><td style="border: none; text-align: left; vertical-align: bottom;">教學組長：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">教務主任：<br><br><br>_________________</td><td style="border: none; text-align: left; vertical-align: bottom;">校長：<br><br><br>_________________</td></tr></table>${photoDivs ? `<br clear=all style='mso-special-character:line-break;page-break-before:always'><h2 style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px;">附件：巡堂照片紀錄</h2>${photoDivs}` : ''}</body></html>`;
-
         const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword;charset=utf-8;' });
         const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `巡堂紀錄表_${filterDate}.doc`; link.click();
       };
@@ -1054,10 +903,7 @@
       const handleExportCSV = () => {
         if (records.length === 0) { alert("無紀錄可匯出"); return; }
         const headers = ['日期', '節次', '處室', '職稱', '姓名', '地點/班級', '任課老師', '代號', '備註', '時間戳記'];
-        const rows = records.map(r => {
-          const vText = (r.violationCodes || ['✓']).join(',');
-          return [r.date, r.period, r.office, r.title, r.name, r.classId, r.teacher || '', vText, r.remark || '', new Date(r.timestamp).toLocaleString()].map(f => `"${String(f).replace(/"/g, '""')}"`).join(',');
-        });
+        const rows = records.map(r => [r.date, r.period, r.office, r.title, r.name, r.classId, r.teacher || '', (r.violationCodes || ['✓']).join(','), r.remark || '', new Date(r.timestamp).toLocaleString()].map(f => `"${String(f).replace(/"/g, '""')}"`).join(','));
         const blob = new Blob(["\uFEFF" + headers.join(',') + '\n' + rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `巡堂紀錄_${filterDate}.csv`; link.click();
       };
@@ -1083,7 +929,6 @@
             });
           }
         });
-
         return {
           violations: { labels: Object.keys(vCounts), datasets: [{ data: Object.values(vCounts), backgroundColor: ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e', '#06b6d4'] }] },
           periods: { labels: PERIODS.filter(p => p !== '其他' && p !== '午休'), datasets: [{ label: '違規次數', data: PERIODS.filter(p => p !== '其他' && p !== '午休').map(p => pCounts[p] || 0), backgroundColor: '#3b82f6', borderRadius: 4 }] },
@@ -1136,16 +981,11 @@
                   filteredRecords.map(r => {
                     const isNormal = (r.violationCodes||['✓']).includes('✓');
                     const hasAlert = !(r.violationCodes||[]).includes('✓');
-                    // ★ Phase 3: 在後台資料表標記還未上傳的本地暫存資料
-                    const isPending = r._isPending;
                     return (
-                    <tr key={r.id} className={`${hasAlert ? "bg-red-50/20" : ""} ${isPending ? "opacity-60" : ""}`}>
+                    <tr key={r.id} className={hasAlert ? "bg-red-50/20" : ""}>
                       <td className="px-4 py-3 text-sm">{r.date}<br/><span className="text-gray-500 text-xs">{r.period}</span></td>
                       <td className="px-4 py-3 text-sm">{r.name}<br/><span className="text-gray-500 text-xs">{r.office}</span></td>
-                      <td className="px-4 py-3 text-sm font-bold text-blue-700">
-                        {r.classId} {isPending && <span className="text-[10px] bg-orange-100 text-orange-600 px-1 rounded ml-1 whitespace-nowrap">⏳ 等待上傳</span>}
-                        <br/><span className="text-gray-500 text-xs font-normal">{r.teacher || '-'}</span>
-                      </td>
+                      <td className="px-4 py-3 text-sm font-bold text-blue-700">{r.classId}<br/><span className="text-gray-500 text-xs font-normal">{r.teacher || '-'}</span></td>
                       <td className="px-4 py-3 text-sm">
                         <div className="flex flex-wrap gap-1">
                           {(r.violationCodes || ['✓']).map(c => <span key={c} className={`px-2 py-0.5 rounded text-xs font-bold ${c === 'H' ? 'bg-red-500 text-white shadow-sm' : (isNormal ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800')}`}>{c}</span>)}
@@ -1174,7 +1014,6 @@
             }} />
           )}
 
-          {/* 新增/升級：多功能智慧通報視窗 */}
           {emailData && emailData.isOpen && (
             <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg flex flex-col max-h-[95vh]">
@@ -1183,7 +1022,6 @@
                   <button onClick={() => setEmailData(null)} className="text-gray-500 hover:text-gray-800 emoji-icon text-xl">❌</button>
                 </div>
                 <div className="p-5 overflow-y-auto space-y-4">
-                  
                   <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
                     <label className="block text-sm font-bold text-yellow-800 mb-1">📋 選擇通報對象與類型</label>
                     <select className="w-full border-yellow-300 rounded p-2 focus:ring-yellow-500 text-sm font-medium" 
@@ -1195,14 +1033,11 @@
                       <option value="general_affairs">🛠️ 【總務環境通報】(設施損壞/水電門窗未關通報)</option>
                     </select>
                   </div>
-
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div className="md:col-span-2">
                       <label className="block text-xs font-bold text-gray-700 mb-1">收件人信箱</label>
                       <input type="email" className="w-full border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500" value={emailData.to} onChange={e => setEmailData({...emailData, to: e.target.value})} placeholder="輸入收件人 Email" />
                     </div>
-                    
-                    {/* 若為學生約談單，動態展開欄位 */}
                     {emailData.template === 'student' && (
                       <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-3">
                         <div>
@@ -1216,7 +1051,6 @@
                       </div>
                     )}
                   </div>
-
                   <div>
                     <label className="block text-xs font-bold text-gray-700 mb-1">自動生成主旨</label>
                     <input type="text" className="w-full border-gray-300 rounded-md p-2 text-sm bg-gray-50 text-gray-800" value={emailData.subject} onChange={e => setEmailData({...emailData, subject: e.target.value})} />
@@ -1226,7 +1060,6 @@
                     <textarea className="w-full border-gray-300 rounded-md p-2 text-sm bg-gray-50 text-gray-800 leading-relaxed" rows="8" value={emailData.body} onChange={e => setEmailData({...emailData, body: e.target.value})}></textarea>
                   </div>
                 </div>
-
                 <div className="p-4 border-t bg-gray-50 rounded-b-xl flex flex-col gap-2">
                   {!EMAIL_API_URL && (
                     <div className="text-xs text-gray-500 text-center mb-1">💡 系統目前使用您的本機/網頁 Email 軟體寄出</div>
@@ -1235,33 +1068,24 @@
                     <button onClick={() => setEmailData(null)} className="px-4 py-2 border rounded bg-white hover:bg-gray-100 text-sm font-medium">取消</button>
                     {!EMAIL_API_URL && (
                         <button onClick={() => {
-                          const copyText = `收件人：${emailData.to}\n主旨：${emailData.subject}\n\n${emailData.body}`;
                           const textArea = document.createElement("textarea");
-                          textArea.value = copyText;
+                          textArea.value = `收件人：${emailData.to}\n主旨：${emailData.subject}\n\n${emailData.body}`;
                           document.body.appendChild(textArea);
                           textArea.select();
-                          try {
-                            document.execCommand('copy');
-                            showToast("📋 已複製信件內容！可手動貼上到您的信箱");
-                          } catch (err) {
-                            alert("複製失敗，請手動圈選複製");
-                          }
+                          try { document.execCommand('copy'); showToast("📋 已複製信件內容！可手動貼上到您的信箱"); } 
+                          catch (err) { alert("複製失敗，請手動圈選複製"); }
                           document.body.removeChild(textArea);
                         }} className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 font-bold text-sm shadow">📋 複製內容</button>
                     )}
                     {!EMAIL_API_URL && (
                         <button onClick={() => {
                           if (!emailData.to) return alert("請輸入收件人信箱");
-                          const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(emailData.to)}&su=${encodeURIComponent(emailData.subject)}&body=${encodeURIComponent(emailData.body)}`;
-                          window.open(gmailUrl, '_blank');
+                          window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(emailData.to)}&su=${encodeURIComponent(emailData.subject)}&body=${encodeURIComponent(emailData.body)}`, '_blank');
                           setEmailData(null);
                         }} className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 font-bold text-sm shadow flex items-center"><span className="emoji-icon mr-1">🌐</span> Gmail 網頁版</button>
                     )}
                     {!EMAIL_API_URL && (
                         <button onClick={executeSendEmail} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 font-bold text-sm shadow">💻 電腦內建軟體</button>
-                    )}
-                    {EMAIL_API_URL && (
-                      <button onClick={executeSendEmail} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 font-bold text-sm shadow">自動發送 (API)</button>
                     )}
                   </div>
                 </div>
@@ -1279,16 +1103,13 @@
       const toggleModalViolation = (code) => {
         setFormData(prev => {
           let newCodes = [...(prev.violationCodes || [])];
-          if (code === '✓') {
-            newCodes = ['✓'];
-          } else {
+          if (code === '✓') newCodes = ['✓'];
+          else {
             newCodes = newCodes.filter(c => c !== '✓');
             if (newCodes.includes(code)) {
               newCodes = newCodes.filter(c => c !== code);
               if (newCodes.length === 0) newCodes = ['✓'];
-            } else {
-              newCodes.push(code);
-            }
+            } else newCodes.push(code);
           }
           return { ...prev, violationCodes: newCodes };
         });
@@ -1297,9 +1118,7 @@
       const handleSubmit = async (e) => {
         e.preventDefault();
         if (!formData.classId || !formData.date || !formData.office || !formData.name) return alert("必填欄位缺失");
-        if (formData.violationCodes.some(c => ['B', 'G', 'H'].includes(c)) && !formData.remark.trim()) {
-          return alert("您選擇了需要說明的代號(如B, G, H)，請務必填寫備註");
-        }
+        if (formData.violationCodes.some(c => ['B', 'G', 'H'].includes(c)) && !formData.remark.trim()) return alert("您選擇了需要說明的代號(如B, G, H)，請務必填寫備註");
         await onSave(formData);
       };
 
@@ -1322,24 +1141,19 @@
                   <input type="text" name="classId" required placeholder="地點/班級" value={formData.classId} onChange={handleChange} className="border p-2 rounded w-full" />
                   <input type="text" name="teacher" placeholder="老師" value={formData.teacher} onChange={handleChange} className="border p-2 rounded w-full" />
                 </div>
-                
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">狀況代號 (可複選)</label>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     {VIOLATIONS.map(v => {
                       const isSelected = formData.violationCodes.includes(v.code);
                       return (
-                        <button
-                          key={v.code} type="button" onClick={() => toggleModalViolation(v.code)} title={v.desc}
-                          className={`px-2 py-2 text-sm font-bold rounded-lg shadow-sm border transition-colors flex items-center justify-center ${isSelected ? (v.isNormal ? 'bg-green-600 text-white border-green-700' : 'bg-red-500 text-white border-red-600') : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
-                        >
+                        <button key={v.code} type="button" onClick={() => toggleModalViolation(v.code)} title={v.desc} className={`px-2 py-2 text-sm font-bold rounded-lg shadow-sm border transition-colors flex items-center justify-center ${isSelected ? (v.isNormal ? 'bg-green-600 text-white border-green-700' : 'bg-red-500 text-white border-red-600') : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}>
                           <span className="mr-1 opacity-70">[{v.code}]</span> {v.short}
                         </button>
                       );
                     })}
                   </div>
                 </div>
-
                 <textarea name="remark" value={formData.remark} onChange={handleChange} rows="3" placeholder="備註說明" className="border p-2 rounded w-full mt-2"></textarea>
               </form>
             </div>
@@ -1357,7 +1171,3 @@
   </script>
 </body>
 </html>
-```
-
-這項功能請幫我修改為您給我的藍圖中提及的:
-將選單改為「建築物/樓層」導向（如：明德樓 3F、弘道樓 1F）。因為巡堂人員是依實體空間移動，依照樓層排序班級按鈕，能讓巡堂人員「走一步、點一個」，完全符合真實巡查動線。
